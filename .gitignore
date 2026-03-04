@@ -1,2 +1,5 @@
 build
 bin
+*.log
+*.iso
+.DS_Store

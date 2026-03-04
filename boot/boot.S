@@ -10,6 +10,10 @@
 .set MB2_MAGIC,         0xe85250d6
 .set MB2_ARCH_X86,      0
 
+/* Multiboot1 (for QEMU -kernel support) */
+.set MB1_MAGIC,         0x1BADB002
+.set MB1_FLAGS,         0x00000003          /* page-align | meminfo */
+
 /* Control registers */
 .set CR4_PAE,           (1 << 5)
 .set CR0_PG,            (1 << 31)
@@ -54,6 +58,13 @@ mb2_hdr_start:
     .short 0
     .long  8
 mb2_hdr_end:
+
+/* Multiboot1 header — within first 8 KiB so QEMU can find it */
+.align 4
+mb1_hdr:
+    .long MB1_MAGIC
+    .long MB1_FLAGS
+    .long -(MB1_MAGIC + MB1_FLAGS)
 
 
 /* ================================================================

@@ -16,6 +16,11 @@ SECTIONS
         *(.text .text.*)
     }
 
+    .vectors : ALIGN(4K)
+    {
+        *(.vectors)
+    }
+
     .rodata : ALIGN(4K)
     {
         *(.rodata .rodata.*)

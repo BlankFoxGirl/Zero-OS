@@ -3,6 +3,8 @@
 #include "memory.h"
 #include "arch_interface.h"
 
+extern "C" void vm_run_test_guest();
+
 static const char *memory_type_str(uint32_t type) {
     switch (type) {
     case MEMORY_AVAILABLE:        return "Available";
@@ -57,6 +59,10 @@ static const char *memory_type_str(uint32_t type) {
         kprintf("  alloc  -> FAILED (out of memory)\n");
     }
 
-    kprintf("\nKernel initialisation complete. Halting.\n");
+    kprintf("\nKernel initialisation complete.\n");
+
+    vm_run_test_guest();
+
+    kprintf("System halting.\n");
     arch_halt();
 }

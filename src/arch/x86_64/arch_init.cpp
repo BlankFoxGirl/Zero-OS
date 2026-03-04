@@ -93,6 +93,31 @@ static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
     }
 }
 
+// ── Multiboot1 parsing (used by QEMU -kernel) ──────────────────────
+
+static void parse_multiboot1(uint32_t mb_info_addr, BootInfo &info) {
+    auto *mbi = reinterpret_cast<Multiboot1Info *>(
+        static_cast<uintptr_t>(mb_info_addr));
+
+    if (!(mbi->flags & MB1_FLAG_MMAP))
+        return;
+
+    auto *entry = reinterpret_cast<Multiboot1MmapEntry *>(
+        static_cast<uintptr_t>(mbi->mmap_addr));
+    uintptr_t end = mbi->mmap_addr + mbi->mmap_length;
+
+    while (reinterpret_cast<uintptr_t>(entry) < end &&
+           info.memory_region_count < MAX_MEMORY_REGIONS) {
+        auto &r = info.memory_regions[info.memory_region_count++];
+        r.base   = entry->base_addr;
+        r.length = entry->length;
+        r.type   = entry->type;
+
+        entry = reinterpret_cast<Multiboot1MmapEntry *>(
+            reinterpret_cast<uintptr_t>(entry) + entry->size + 4);
+    }
+}
+
 // ── Entry point (called from boot.S) ─────────────────────────────────
 
 extern "C" [[noreturn]]
@@ -105,9 +130,10 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
 
     if (mb_magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
         parse_multiboot2(mb_info_addr, info);
+    } else if (mb_magic == MULTIBOOT1_BOOTLOADER_MAGIC) {
+        parse_multiboot1(mb_info_addr, info);
     } else {
-        kprintf("WARNING: bad Multiboot2 magic 0x%x (expected 0x%x)\n",
-                mb_magic, MULTIBOOT2_BOOTLOADER_MAGIC);
+        kprintf("WARNING: unknown multiboot magic 0x%x\n", mb_magic);
     }
 
     kernel_start(info);

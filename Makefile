@@ -11,6 +11,7 @@
 # Supported ARCH values: x86  x86_64  arm  aarch64
 
 ARCH ?= x86_64
+comma := ,
 
 # ── Output directories ──────────────────────────────────────────────
 
@@ -38,10 +39,11 @@ else ifeq ($(ARCH),arm)
   TARGET   := $(BIN)/zeroos-arm.elf
 
 else ifeq ($(ARCH),aarch64)
-  CROSS    := aarch64-none-elf-
+  CROSS    := aarch64-elf-
   BOOT_SRC := boot/boot_aarch64.S
   LDSCRIPT := src/arch/aarch64/linker.ld
   TARGET   := $(BIN)/zeroos-aarch64.elf
+  ARCHFLAGS := -mgeneral-regs-only
 
 else
   $(error Unsupported ARCH=$(ARCH). Choose: x86 x86_64 arm aarch64)
@@ -60,10 +62,11 @@ WARNINGS := -Wall -Wextra
 INCLUDES := -Iinclude
 DEPFLAGS := -MMD -MP
 
-CFLAGS   := -ffreestanding -std=c11   $(WARNINGS) $(INCLUDES) $(DEPFLAGS)
+ARCHFLAGS ?=
+CFLAGS   := -ffreestanding -std=c11   $(WARNINGS) $(INCLUDES) $(DEPFLAGS) $(ARCHFLAGS)
 CXXFLAGS := -ffreestanding -std=c++17 $(WARNINGS) $(INCLUDES) $(DEPFLAGS) \
-            -fno-exceptions -fno-rtti
-ASFLAGS  := -ffreestanding
+            -fno-exceptions -fno-rtti $(ARCHFLAGS)
+ASFLAGS  := -ffreestanding $(INCLUDES)
 LDFLAGS  := -nostdlib -T $(LDSCRIPT)
 
 ifdef DEBUG
@@ -80,18 +83,22 @@ BOOT_OBJ := $(BUILD)/boot.o
 
 ARCH_CPP := $(wildcard src/arch/$(ARCH)/*.cpp)
 ARCH_C   := $(wildcard src/arch/$(ARCH)/*.c)
+ARCH_ASM := $(wildcard src/arch/$(ARCH)/*.S)
 KERN_CPP := $(wildcard src/kernel/*.cpp)
 KERN_C   := $(wildcard src/kernel/*.c)
 VM_CPP   := $(wildcard src/vm/*.cpp)
 VM_C     := $(wildcard src/vm/*.c)
+VM_ASM   := $(wildcard src/vm/*.S)
 
 OBJS := $(BOOT_OBJ)                                                        \
         $(patsubst src/arch/$(ARCH)/%.cpp, $(BUILD)/arch/%.o,   $(ARCH_CPP)) \
         $(patsubst src/arch/$(ARCH)/%.c,   $(BUILD)/arch/%.o,   $(ARCH_C))   \
+        $(patsubst src/arch/$(ARCH)/%.S,   $(BUILD)/arch/%.o,   $(ARCH_ASM)) \
         $(patsubst src/kernel/%.cpp,       $(BUILD)/kernel/%.o, $(KERN_CPP)) \
         $(patsubst src/kernel/%.c,         $(BUILD)/kernel/%.o, $(KERN_C))   \
         $(patsubst src/vm/%.cpp,           $(BUILD)/vm/%.o,     $(VM_CPP))   \
-        $(patsubst src/vm/%.c,             $(BUILD)/vm/%.o,     $(VM_C))
+        $(patsubst src/vm/%.c,             $(BUILD)/vm/%.o,     $(VM_C))     \
+        $(patsubst src/vm/%.S,             $(BUILD)/vm/%.o,     $(VM_ASM))
 
 DEPS := $(OBJS:.o=.d)
 -include $(DEPS)
@@ -99,7 +106,7 @@ DEPS := $(OBJS:.o=.d)
 # ── Phony targets ───────────────────────────────────────────────────
 
 .PHONY: kernel iso image clean all \
-        run-x86 run-x86_64 run-arm run-aarch64
+        run-x86 run-x86_64 run-arm run-aarch64 run-aarch64-vm
 
 # ── Default target ───────────────────────────────────────────────────
 
@@ -128,6 +135,9 @@ $(BUILD)/arch/%.o: src/arch/$(ARCH)/%.cpp | $(BUILD)/arch
 $(BUILD)/arch/%.o: src/arch/$(ARCH)/%.c | $(BUILD)/arch
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/arch/%.o: src/arch/$(ARCH)/%.S | $(BUILD)/arch
+	$(CC) $(ASFLAGS) -c $< -o $@
+
 $(BUILD)/kernel/%.o: src/kernel/%.cpp | $(BUILD)/kernel
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -139,6 +149,9 @@ $(BUILD)/vm/%.o: src/vm/%.cpp | $(BUILD)/vm
 
 $(BUILD)/vm/%.o: src/vm/%.c | $(BUILD)/vm
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/vm/%.o: src/vm/%.S | $(BUILD)/vm
+	$(CC) $(ASFLAGS) -c $< -o $@
 
 # ── Bootable ISO (x86 / x86_64) ─────────────────────────────────────
 
@@ -153,7 +166,7 @@ iso: kernel
 	cp $(TARGET) $(BUILD)/isodir/boot/zeroos.elf
 	@printf 'set timeout=0\nset default=0\n\nmenuentry "ZeroOS" {\n    multiboot2 /boot/zeroos.elf\n    boot\n}\n' \
 		> $(BUILD)/isodir/boot/grub/grub.cfg
-	grub-mkrescue -o $(ISO) $(BUILD)/isodir
+	$(CROSS)grub-mkrescue -o $(ISO) $(BUILD)/isodir
 	@echo "[$(ARCH)] ISO ready: $(ISO)"
 
 # ── Raw binary image (arm / aarch64) ────────────────────────────────
@@ -171,12 +184,12 @@ image: kernel
 QEMU_COMMON := -serial stdio -no-reboot -no-shutdown
 
 run-x86:
-	@$(MAKE) --no-print-directory ARCH=x86 iso
-	qemu-system-i386 -cdrom $(BIN)/zeroos-x86.iso $(QEMU_COMMON)
+	@$(MAKE) --no-print-directory ARCH=x86 kernel
+	qemu-system-i386 -kernel $(BIN)/zeroos-x86.elf $(QEMU_COMMON)
 
 run-x86_64:
-	@$(MAKE) --no-print-directory ARCH=x86_64 iso
-	qemu-system-x86_64 -cdrom $(BIN)/zeroos-x86_64.iso $(QEMU_COMMON)
+	@$(MAKE) --no-print-directory ARCH=x86_64 kernel
+	qemu-system-x86_64 -kernel $(BIN)/zeroos-x86_64.elf $(QEMU_COMMON)
 
 run-arm:
 	@$(MAKE) --no-print-directory ARCH=arm kernel
@@ -184,7 +197,33 @@ run-arm:
 
 run-aarch64:
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
-	qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel $(BIN)/zeroos-aarch64.elf $(QEMU_COMMON)
+	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
+		-cpu cortex-a57 -m 512 \
+		-kernel $(BIN)/zeroos-aarch64.elf $(QEMU_COMMON)
+
+# Boot an aarch64 Linux kernel inside the ZeroOS VM.
+# Usage:
+#   make run-aarch64-vm GUEST_KERNEL=path/to/Image
+#   make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
+#
+# The kernel Image is loaded at HPA 0x48080000 (= guest IPA 0x40080000,
+# the default arm64 text_offset).  The initrd, if given, is loaded at
+# HPA 0x4C000000 (= guest IPA 0x44000000).
+
+GUEST_KERNEL_HPA := 0x48080000
+GUEST_INITRD_HPA := 0x4C000000
+
+run-aarch64-vm:
+ifndef GUEST_KERNEL
+	$(error GUEST_KERNEL is required. Usage: make run-aarch64-vm GUEST_KERNEL=path/to/Image)
+endif
+	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
+	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
+		-cpu cortex-a57 -m 512 \
+		-kernel $(BIN)/zeroos-aarch64.elf \
+		-device loader,file=$(GUEST_KERNEL),addr=$(GUEST_KERNEL_HPA),force-raw=on \
+		$(if $(GUEST_INITRD),-device loader$(comma)file=$(GUEST_INITRD)$(comma)addr=$(GUEST_INITRD_HPA)$(comma)force-raw=on) \
+		$(QEMU_COMMON)
 
 # ── Directory creation ───────────────────────────────────────────────
 
