@@ -10,7 +10,7 @@
 
 static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
 static constexpr uint64_t GUEST_RAM_IPA  = 0x40000000ULL;
-static constexpr uint64_t GUEST_RAM_MAX  = 64ULL * 1024 * 1024;
+static constexpr uint64_t GUEST_RAM_MAX  = 256ULL * 1024 * 1024;
 
 // ── HCR_EL2 bit definitions ─────────────────────────────────────────
 
@@ -322,6 +322,8 @@ void vm_destroy(VM *vm) {
 
 bool vm_boot_linux(VM *vm, uint64_t initrd_ipa, uint64_t initrd_size);
 bool vm_has_linux_image();
+bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
+                          uint64_t *out_initrd_size);
 
 // ── Run the VM (test guest or Linux) ─────────────────────────────────
 
@@ -351,14 +353,15 @@ void vm_run_test_guest() {
     VM *vm = r.value();
 
     if (vm_has_linux_image()) {
-        // Linux kernel was pre-loaded into guest RAM by QEMU -device loader
-        kprintf("vm: Linux kernel detected, booting...\n");
+        kprintf("vm: guest image detected in staging area, loading...\n");
 
-        // Initrd location (if loaded by QEMU -device loader)
-        // Default: IPA 0x44000000, but size must be determined externally.
-        // For now, assume no initrd unless it's clearly present.
         uint64_t initrd_ipa  = 0;
         uint64_t initrd_size = 0;
+
+        if (!vm_load_guest_images(vm, &initrd_ipa, &initrd_size)) {
+            kprintf("vm: failed to load guest images\n");
+            return;
+        }
 
         if (!vm_boot_linux(vm, initrd_ipa, initrd_size)) {
             kprintf("vm: Linux boot setup failed\n");
@@ -372,8 +375,7 @@ void vm_run_test_guest() {
                 exit_reason_str(exit.reason),
                 (unsigned long long)exit.esr);
     } else {
-        // No Linux image — run the built-in test guest
-        kprintf("vm: no Linux image found, running test guest...\n");
+        kprintf("vm: no guest image found, running test guest...\n");
 
         vm_load_image(vm, test_guest_code, sizeof(test_guest_code), 0);
 

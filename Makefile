@@ -201,27 +201,29 @@ run-aarch64:
 		-cpu cortex-a57 -m 512 \
 		-kernel $(BIN)/zeroos-aarch64.elf $(QEMU_COMMON)
 
-# Boot an aarch64 Linux kernel inside the ZeroOS VM.
+# Boot an aarch64 guest inside the ZeroOS VM.
 # Usage:
-#   make run-aarch64-vm GUEST_KERNEL=path/to/Image
+#   make run-aarch64-vm GUEST_KERNEL=path/to/alpine.iso
+#   make run-aarch64-vm GUEST_KERNEL=path/to/Image              (raw kernel)
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
 #
-# The kernel Image is loaded at HPA 0x48080000 (= guest IPA 0x40080000,
-# the default arm64 text_offset).  The initrd, if given, is loaded at
-# HPA 0x4C000000 (= guest IPA 0x44000000).
+# The guest image (ISO or raw kernel) is loaded into a staging area at
+# HPA 0x58000000, outside the 256 MiB guest RAM region.  The guest
+# loader detects the format (ISO 9660 or raw arm64 Image) and copies
+# the kernel/initramfs into guest RAM before booting.
 
-GUEST_KERNEL_HPA := 0x48080000
-GUEST_INITRD_HPA := 0x4C000000
+GUEST_STAGING_HPA := 0x58000000
+GUEST_INITRD_HPA  := 0x60000000
 
 run-aarch64-vm:
 ifndef GUEST_KERNEL
-	$(error GUEST_KERNEL is required. Usage: make run-aarch64-vm GUEST_KERNEL=path/to/Image)
+	$(error GUEST_KERNEL is required. Usage: make run-aarch64-vm GUEST_KERNEL=path/to/Image.iso)
 endif
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
 	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
-		-cpu cortex-a57 -m 512 \
+		-cpu cortex-a57 -m 1536 \
 		-kernel $(BIN)/zeroos-aarch64.elf \
-		-device loader,file=$(GUEST_KERNEL),addr=$(GUEST_KERNEL_HPA),force-raw=on \
+		-device loader,file=$(GUEST_KERNEL),addr=$(GUEST_STAGING_HPA),force-raw=on \
 		$(if $(GUEST_INITRD),-device loader$(comma)file=$(GUEST_INITRD)$(comma)addr=$(GUEST_INITRD_HPA)$(comma)force-raw=on) \
 		$(QEMU_COMMON)
 
