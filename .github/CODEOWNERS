@@ -1,0 +1,21 @@
+# Default owner for the entire repository
+* @BlankFoxGirl
+
+# Bootloader
+/boot/ @BlankFoxGirl
+
+# Kernel core
+/src/kernel/ @BlankFoxGirl
+
+# Architecture-specific code
+/src/arch/ @BlankFoxGirl
+
+# Virtualization layer
+/src/vm/ @BlankFoxGirl
+
+# Shared headers
+/include/ @BlankFoxGirl
+
+# Build system
+/Makefile @BlankFoxGirl
+/linker/ @BlankFoxGirl
