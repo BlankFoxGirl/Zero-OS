@@ -39,10 +39,11 @@ struct ZimgHeader {
 
 static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
 static constexpr uint64_t GUEST_RAM_IPA  = 0x40000000ULL;
-static constexpr uint64_t GUEST_RAM_SIZE = 256ULL * 1024 * 1024;
+static constexpr uint64_t GUEST_RAM_SIZE = 512ULL * 1024 * 1024;
 
-// QEMU -device loader places the ISO/Image here (outside guest RAM)
-static constexpr uint64_t STAGING_HPA = 0x58000000ULL;
+// QEMU -device loader places the ISO/Image here (coincides with the ramdisk
+// backing region so the ISO content persists on the virtio-blk device).
+static constexpr uint64_t STAGING_HPA = 0x68000000ULL;
 
 static constexpr uint64_t DEFAULT_TEXT_OFFSET = 0x80000;
 
@@ -246,6 +247,44 @@ static bool detect_raw_image(GuestImages *img) {
     img->initrd      = nullptr;
     img->initrd_size = 0;
     return true;
+}
+
+// ── ISO disk size detection ──────────────────────────────────────────
+// Returns the actual disk size in bytes by reading the GPT primary
+// header or ISO9660 PVD from the staging area.  Falls back to
+// |fallback_size| when neither structure is found.
+
+uint64_t detect_iso_disk_size(uint64_t fallback_size) {
+    auto *staging = reinterpret_cast<const uint8_t *>(STAGING_HPA);
+
+    // GPT primary header lives at LBA 1 (byte offset 512)
+    const uint8_t *gpt = staging + 512;
+    auto *gptv = reinterpret_cast<const volatile uint8_t *>(gpt);
+    if (gptv[0] == 'E' && gptv[1] == 'F' && gptv[2] == 'I' && gptv[3] == ' ' &&
+        gptv[4] == 'P' && gptv[5] == 'A' && gptv[6] == 'R' && gptv[7] == 'T') {
+        uint64_t alt_lba = safe_read_le64(gpt + 32);
+        uint64_t disk_bytes = (alt_lba + 1) * 512;
+        kprintf("guest_loader: GPT detected — disk size %llu MiB (%llu sectors)\n",
+                (unsigned long long)(disk_bytes / (1024 * 1024)),
+                (unsigned long long)(alt_lba + 1));
+        return disk_bytes;
+    }
+
+    // Fall back to ISO9660 PVD volume_space_size (sector 16, offset 80 LE32)
+    static constexpr uint32_t ISO_SECTOR = 2048;
+    static constexpr uint32_t PVD_OFF    = 16 * ISO_SECTOR;
+    const uint8_t *pvd = staging + PVD_OFF;
+    auto *pvdv = reinterpret_cast<const volatile uint8_t *>(pvd);
+    if (pvdv[0] == 1 && pvdv[1] == 'C' && pvdv[2] == 'D' &&
+        pvdv[3] == '0' && pvdv[4] == '0' && pvdv[5] == '1') {
+        uint32_t vol_blocks = safe_read_le32(pvd + 80);
+        uint64_t disk_bytes = static_cast<uint64_t>(vol_blocks) * ISO_SECTOR;
+        kprintf("guest_loader: ISO9660 PVD — disk size %llu MiB (%u blocks)\n",
+                (unsigned long long)(disk_bytes / (1024 * 1024)), vol_blocks);
+        return disk_bytes;
+    }
+
+    return fallback_size;
 }
 
 // ── Load images into guest RAM ───────────────────────────────────────

@@ -50,6 +50,7 @@ static constexpr uint32_t GICC_CTLR       = 0x000;
 static constexpr uint32_t GICC_PMR        = 0x004;
 static constexpr uint32_t GICC_IAR        = 0x00C;
 static constexpr uint32_t GICC_EOIR       = 0x010;
+static constexpr uint32_t GICC_DIR        = 0x1000;
 
 // ── GICH register offsets ────────────────────────────────────────────
 
@@ -88,6 +89,11 @@ void vgic_host_init() {
     // Set priority for INTID 27 (lower = higher priority)
     uint32_t pri_off = GICD_IPRIORITYR + 27;
     *reinterpret_cast<volatile uint8_t *>(GICD_BASE + pri_off) = 0x80;
+
+    // Enable physical UART RX interrupt (SPI #1, INTID 33)
+    // ISENABLER1 handles INTIDs 32-63; bit 1 = INTID 33
+    mmio_write32(GICD_BASE + GICD_ISENABLER + 4, (1u << 1));
+    *reinterpret_cast<volatile uint8_t *>(GICD_BASE + GICD_IPRIORITYR + 33) = 0x80;
 
     // Enable physical CPU interface with EOImode=1
     // EOImodeNS (bit 9): EOIR does priority drop only, GICC_DIR deactivates
@@ -149,11 +155,20 @@ static int find_free_lr() {
 }
 
 void vgic_inject_hw(uint32_t virtual_id, uint32_t physical_id) {
-    int lr = find_free_lr();
-    if (lr < 0) {
-        kprintf("vgic: no free list register for INTID %u\n", virtual_id);
-        return;
+    // Check for duplicate — don't consume another LR if this INTID is
+    // already pending or active (same logic as vgic_inject_spi).
+    uint32_t elsr = mmio_read32(GICH_BASE + GICH_ELSR0);
+    for (uint32_t i = 0; i < vgic.num_lr && i < 32; i++) {
+        if (elsr & (1u << i))
+            continue;
+        uint32_t lr_val = mmio_read32(GICH_BASE + GICH_LR_BASE + i * 4);
+        if ((lr_val & 0x3FF) == virtual_id)
+            return;
     }
+
+    int lr = find_free_lr();
+    if (lr < 0)
+        return;
 
     // GICH_LR format (GICv2):
     //   [31]    HW=1 (hardware interrupt)
@@ -168,6 +183,40 @@ void vgic_inject_hw(uint32_t virtual_id, uint32_t physical_id) {
                       (virtual_id & 0x3FF);
 
     mmio_write32(GICH_BASE + GICH_LR_BASE + lr * 4, lr_val);
+    asm volatile("dsb sy" ::: "memory");
+}
+
+// ── Inject a virtual-only SPI (no backing physical IRQ) ──────────────
+
+void vgic_inject_spi(uint32_t spi_num) {
+    uint32_t virtual_id = spi_num + 32;   // SPIs start at INTID 32
+
+    // Check if this INTID is already pending/active in an LR to avoid
+    // duplicate entries that would exhaust the limited LR pool.
+    uint32_t elsr = mmio_read32(GICH_BASE + GICH_ELSR0);
+    for (uint32_t i = 0; i < vgic.num_lr && i < 32; i++) {
+        if (elsr & (1u << i))
+            continue;  // LR is empty
+        uint32_t lr = mmio_read32(GICH_BASE + GICH_LR_BASE + i * 4);
+        if ((lr & 0x3FF) == virtual_id)
+            return;  // already pending or active
+    }
+
+    int lr = find_free_lr();
+    if (lr < 0)
+        return;
+
+    // GICH_LR format (GICv2), software-only (HW=0):
+    //   [31]    HW=0
+    //   [29:28] State = 01 (Pending)
+    //   [27:23] Priority[4:0]
+    //   [9:0]   VirtualID
+    uint32_t lr_val = (1u << 28) |           // State = Pending
+                      (0u << 23) |           // Priority 0 (highest)
+                      (virtual_id & 0x3FF);
+
+    mmio_write32(GICH_BASE + GICH_LR_BASE + lr * 4, lr_val);
+    asm volatile("dsb sy" ::: "memory");
 }
 
 // ── Handle physical IRQ at EL2 (called from VM exit IRQ path) ────────
@@ -178,15 +227,22 @@ void vgic_handle_host_irq() {
 
     if (intid >= 1020) return;   // spurious
 
-    // Priority-drop only (EOImode=1); deactivation via HW bit in LR
+    // Priority-drop only (EOImode=1)
     mmio_write32(GICC_BASE + GICC_EOIR, iar);
 
     extern void vtimer_handle_irq();
+    extern void vuart_handle_rx_irq();
 
     if (intid == 27) {
+        // Timer uses HW LR — guest EOI triggers physical deactivation
         vtimer_handle_irq();
+    } else if (intid == 33) {
+        vuart_handle_rx_irq();
+        // Handled entirely in EL2; deactivate manually
+        mmio_write32(GICC_BASE + GICC_DIR, iar);
     } else {
         kprintf("vgic: unhandled physical INTID %u\n", intid);
+        mmio_write32(GICC_BASE + GICC_DIR, iar);
     }
 }
 

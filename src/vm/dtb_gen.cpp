@@ -207,6 +207,11 @@ uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
         fdt_prop_cells("reg", reg, 4);
     }
     {
+        // SPI #1 → INTID 33, level-triggered (0x4)
+        uint32_t interrupts[] = { 0, 1, 4 };
+        fdt_prop_cells("interrupts", interrupts, 3);
+    }
+    {
         uint32_t clocks[] = { PHANDLE_CLK, PHANDLE_CLK };
         fdt_prop_cells("clocks", clocks, 2);
     }
@@ -215,6 +220,20 @@ uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
         fdt_prop_strs("clock-names", names, sizeof(names));
     }
     fdt_end_node(); // pl011
+
+    // ── virtio-mmio block device ──
+    fdt_begin_node("virtio_mmio@a000000");
+    fdt_prop_str("compatible", "virtio,mmio");
+    {
+        uint32_t reg[] = { 0, 0x0A000000, 0, 0x200 };
+        fdt_prop_cells("reg", reg, 4);
+    }
+    {
+        // SPI #16 → INTID 48, edge-triggered (0x1)
+        uint32_t interrupts[] = { 0, 16, 1 };
+        fdt_prop_cells("interrupts", interrupts, 3);
+    }
+    fdt_end_node(); // virtio_mmio
 
     // ── fixed clock (for UART) ──
     fdt_begin_node("apb-pclk");
@@ -227,8 +246,9 @@ uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
 
     // ── chosen ──
     fdt_begin_node("chosen");
+    fdt_prop_str("stdout-path", "/pl011@9000000");
     fdt_prop_str("bootargs",
-                 "console=ttyAMA0 earlycon=pl011,0x09000000");
+                 "console=ttyAMA0 earlycon=pl011,0x09000000 loglevel=8");
 
     if (initrd_start && initrd_end > initrd_start) {
         fdt_prop_u64("linux,initrd-start", initrd_start);

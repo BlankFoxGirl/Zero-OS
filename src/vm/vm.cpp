@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "virtio_blk.h"
 #include "string.h"
 #include "console.h"
 #include "memory.h"
@@ -10,7 +11,13 @@
 
 static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
 static constexpr uint64_t GUEST_RAM_IPA  = 0x40000000ULL;
-static constexpr uint64_t GUEST_RAM_MAX  = 256ULL * 1024 * 1024;
+static constexpr uint64_t GUEST_RAM_MAX  = 512ULL * 1024 * 1024;
+
+// Ramdisk backing store sits immediately after guest RAM.
+// With 2048 MiB total (0x40000000..0xC0000000) and 128 MiB for ZeroOS + 512 MiB
+// for guest RAM, the remaining ~1408 MiB is available for the ramdisk.
+static constexpr uint64_t RAMDISK_HPA  = GUEST_RAM_HPA + GUEST_RAM_MAX;  // 0x68000000
+static constexpr uint64_t RAMDISK_SIZE = 1408ULL * 1024 * 1024;          // ~1.375 GiB
 
 // ── HCR_EL2 bit definitions ─────────────────────────────────────────
 
@@ -62,6 +69,8 @@ bool vgic_mmio_access(uint64_t ipa, bool is_write, uint32_t width,
 
 bool vuart_mmio_access(uint64_t ipa, bool is_write, uint32_t width,
                        uint64_t *val);
+void vuart_check_irq();
+void vuart_init();
 
 void vtimer_init();
 
@@ -114,6 +123,9 @@ static bool dispatch_mmio(VM *vm, MmioAccess &acc) {
     if (vuart_mmio_access(acc.ipa, acc.is_write, acc.width, &acc.value))
         return true;
 
+    if (virtio_blk_mmio_access(acc.ipa, acc.is_write, acc.width, &acc.value))
+        return true;
+
     return false;
 }
 
@@ -138,6 +150,7 @@ void vm_init() {
     memset(&the_vm, 0, sizeof(the_vm));
     vgic_host_init();
     vtimer_init();
+    vuart_init();
 }
 
 Result<VM*> vm_create(uint64_t ram_size_bytes) {
@@ -150,6 +163,8 @@ Result<VM*> vm_create(uint64_t ram_size_bytes) {
     vm->guest_ram_hpa  = GUEST_RAM_HPA;
     vm->guest_ram_ipa  = GUEST_RAM_IPA;
     vm->guest_ram_size = ram_size_bytes;
+    vm->ramdisk_hpa    = RAMDISK_HPA;
+    vm->ramdisk_size   = RAMDISK_SIZE;
     vm->vmid           = 1;
     vm->state          = VmState::Created;
 
@@ -210,7 +225,18 @@ bool vm_load_image(VM *vm, const void *image,
 VmExit vm_run(VM *vm) {
     vm->state = VmState::Running;
 
+    uint32_t irq_ticks = 0;
+    bool diag_printed = false;
+
     for (;;) {
+        // Re-assert virtio-blk SPI if a completion is still pending.
+        // UART check is deliberately omitted here — the always-empty TX
+        // FIFO keeps TXRIS permanently set, and re-injecting the UART SPI
+        // on every guest entry floods the limited GICH List Registers,
+        // starving virtio-blk completions.  UART interrupts are re-asserted
+        // on WFI (below) and on actual events (DR write, RX data, IMSC change).
+        virtio_blk_check_irq();
+
         write_hcr_el2(HCR_GUEST);
         stage2_activate(vm->stage2_root, vm->vmid);
 
@@ -222,6 +248,14 @@ VmExit vm_run(VM *vm) {
         // IRQ exit — handle physical interrupt and re-enter guest
         if (esr == VM_EXIT_IRQ) {
             vgic_handle_host_irq();
+            irq_ticks++;
+            if (!diag_printed && irq_ticks >= 500) {
+                diag_printed = true;
+                kprintf("vm-diag: irq_ticks=%u blk_kicks=%u blk_reqs=%u\n",
+                        irq_ticks,
+                        virtio_blk_kick_count(),
+                        virtio_blk_req_count());
+            }
             continue;
         }
 
@@ -282,7 +316,10 @@ VmExit vm_run(VM *vm) {
         }
 
         case EC_WFI_WFE:
-            // Guest executed WFI — just re-enter
+            // Re-assert any level-triggered device IRQs so the guest
+            // doesn't sleep through a condition that is still active.
+            vuart_check_irq();
+            virtio_blk_check_irq();
             vm->vcpu.elr_el2 += 4;
             continue;
 
@@ -324,6 +361,7 @@ bool vm_boot_linux(VM *vm, uint64_t initrd_ipa, uint64_t initrd_size);
 bool vm_has_linux_image();
 bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
                           uint64_t *out_initrd_size);
+uint64_t detect_iso_disk_size(uint64_t fallback_size);
 
 // ── Run the VM (test guest or Linux) ─────────────────────────────────
 
@@ -362,6 +400,12 @@ void vm_run_test_guest() {
             kprintf("vm: failed to load guest images\n");
             return;
         }
+
+        // Initialise the RAM-backed virtual disk.  Use the ISO's actual
+        // disk size so the GPT backup header location is consistent.
+        uint64_t disk_size = detect_iso_disk_size(vm->ramdisk_size);
+        virtio_blk_init(vm->ramdisk_hpa, disk_size,
+                        vm->guest_ram_hpa, vm->guest_ram_ipa);
 
         if (!vm_boot_linux(vm, initrd_ipa, initrd_size)) {
             kprintf("vm: Linux boot setup failed\n");

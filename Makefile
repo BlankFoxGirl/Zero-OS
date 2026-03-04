@@ -43,7 +43,7 @@ else ifeq ($(ARCH),aarch64)
   BOOT_SRC := boot/boot_aarch64.S
   LDSCRIPT := src/arch/aarch64/linker.ld
   TARGET   := $(BIN)/zeroos-aarch64.elf
-  ARCHFLAGS := -mgeneral-regs-only
+  ARCHFLAGS := -mgeneral-regs-only -mstrict-align
 
 else
   $(error Unsupported ARCH=$(ARCH). Choose: x86 x86_64 arm aarch64)
@@ -198,7 +198,7 @@ run-arm:
 run-aarch64:
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
 	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
-		-cpu cortex-a57 -m 512 \
+		-cpu cortex-a57 -m 2048 \
 		-kernel $(BIN)/zeroos-aarch64.elf $(QEMU_COMMON)
 
 # Boot an aarch64 guest inside the ZeroOS VM.
@@ -207,13 +207,13 @@ run-aarch64:
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image              (raw kernel)
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
 #
-# The guest image (ISO or raw kernel) is loaded into a staging area at
-# HPA 0x58000000, outside the 256 MiB guest RAM region.  The guest
-# loader detects the format (ISO 9660 or raw arm64 Image) and copies
-# the kernel/initramfs into guest RAM before booting.
+# The guest image (ISO or raw kernel) is loaded into the ramdisk backing
+# region at HPA 0x68000000.  After the guest loader copies the kernel
+# and initramfs into guest RAM, the ISO content stays in place and is
+# exposed to the guest via a virtio-blk device (RAM-backed virtual disk).
 
-GUEST_STAGING_HPA := 0x58000000
-GUEST_INITRD_HPA  := 0x60000000
+GUEST_STAGING_HPA := 0x68000000
+GUEST_INITRD_HPA  := 0x70000000
 
 run-aarch64-vm:
 ifndef GUEST_KERNEL
@@ -221,7 +221,7 @@ ifndef GUEST_KERNEL
 endif
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
 	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
-		-cpu cortex-a57 -m 1536 \
+		-cpu cortex-a57 -m 2048 \
 		-kernel $(BIN)/zeroos-aarch64.elf \
 		-device loader,file=$(GUEST_KERNEL),addr=$(GUEST_STAGING_HPA),force-raw=on \
 		$(if $(GUEST_INITRD),-device loader$(comma)file=$(GUEST_INITRD)$(comma)addr=$(GUEST_INITRD_HPA)$(comma)force-raw=on) \

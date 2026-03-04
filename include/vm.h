@@ -73,6 +73,9 @@ struct VM {
     uint64_t   guest_ram_size;
     uint64_t   guest_ram_ipa;     // IPA where guest sees its RAM
 
+    uintptr_t  ramdisk_hpa;       // host physical address of ramdisk backing
+    uint64_t   ramdisk_size;      // bytes available for the virtual disk
+
     VmState    state;
     VmExit     last_exit;
 };
