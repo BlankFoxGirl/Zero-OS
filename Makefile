@@ -37,6 +37,7 @@ else ifeq ($(ARCH),arm)
   BOOT_SRC := boot/boot_arm.S
   LDSCRIPT := src/arch/arm/linker.ld
   TARGET   := $(BIN)/zeroos-arm.elf
+  ARCHFLAGS := -march=armv7-a
 
 else ifeq ($(ARCH),aarch64)
   CROSS    := aarch64-elf-
@@ -66,7 +67,7 @@ ARCHFLAGS ?=
 CFLAGS   := -ffreestanding -std=c11   $(WARNINGS) $(INCLUDES) $(DEPFLAGS) $(ARCHFLAGS)
 CXXFLAGS := -ffreestanding -std=c++17 $(WARNINGS) $(INCLUDES) $(DEPFLAGS) \
             -fno-exceptions -fno-rtti $(ARCHFLAGS)
-ASFLAGS  := -ffreestanding $(INCLUDES)
+ASFLAGS  := -ffreestanding $(INCLUDES) $(ARCHFLAGS)
 LDFLAGS  := -nostdlib -T $(LDSCRIPT)
 
 ifdef DEBUG

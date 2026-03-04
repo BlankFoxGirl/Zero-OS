@@ -1,3 +1,5 @@
+[![Makefile CI](https://github.com/BlankFoxGirl/Zero-OS/actions/workflows/ci.yml/badge.svg)](https://github.com/BlankFoxGirl/Zero-OS/actions/workflows/ci.yml)
+
 ## ZeroOS
 A basic Operating System which runs a virtual machine from an ISO image. The point of this is to;
 - Learn how to build a basic C++ kernal with Bootloader.
