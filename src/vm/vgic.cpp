@@ -90,10 +90,16 @@ void vgic_host_init() {
     uint32_t pri_off = GICD_IPRIORITYR + 27;
     *reinterpret_cast<volatile uint8_t *>(GICD_BASE + pri_off) = 0x80;
 
-    // Enable physical UART RX interrupt (SPI #1, INTID 33)
-    // ISENABLER1 handles INTIDs 32-63; bit 1 = INTID 33
-    mmio_write32(GICD_BASE + GICD_ISENABLER + 4, (1u << 1));
+    // Enable physical UART RX interrupt (SPI #1, INTID 33) and
+    // passthrough virtio-mmio SPIs (SPI 16–47 → INTID 48–79).
+    // ISENABLER1 covers INTIDs 32–63: bit 1 = INTID 33, bits 16–31 = INTIDs 48–63
+    mmio_write32(GICD_BASE + GICD_ISENABLER + 4, (1u << 1) | 0xFFFF0000u);
+    // ISENABLER2 covers INTIDs 64–95: bits 0–15 = INTIDs 64–79
+    mmio_write32(GICD_BASE + GICD_ISENABLER + 8, 0x0000FFFFu);
+
     *reinterpret_cast<volatile uint8_t *>(GICD_BASE + GICD_IPRIORITYR + 33) = 0x80;
+    for (uint32_t id = 48; id < 80; id++)
+        *reinterpret_cast<volatile uint8_t *>(GICD_BASE + GICD_IPRIORITYR + id) = 0x80;
 
     // Enable physical CPU interface with EOImode=1
     // EOImodeNS (bit 9): EOIR does priority drop only, GICC_DIR deactivates
@@ -240,6 +246,10 @@ void vgic_handle_host_irq() {
         vuart_handle_rx_irq();
         // Handled entirely in EL2; deactivate manually
         mmio_write32(GICC_BASE + GICC_DIR, iar);
+    } else if (intid >= 48 && intid < 80) {
+        // Passthrough virtio-mmio SPI — forward to guest via HW LR.
+        // Guest EOI will automatically deactivate the physical interrupt.
+        vgic_inject_hw(intid, intid);
     } else {
         kprintf("vgic: unhandled physical INTID %u\n", intid);
         mmio_write32(GICC_BASE + GICC_DIR, iar);
