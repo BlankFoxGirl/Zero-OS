@@ -1,0 +1,21 @@
+---
+description: ZeroOS project context and conventions
+alwaysApply: true
+---
+
+# ZeroOS Project Overview
+
+ZeroOS is a lightweight operating system that boots from USB, leaves no trace on the host machine, and runs a virtual machine from an ISO image.
+
+## Goals
+
+- Build a bare-metal C++ kernel with a bootloader
+- Create an abstract virtualization layer to spin up arbitrary VMs
+- Support both ARM and x86 (32-bit and 64-bit) architectures
+
+## Key Constraints
+
+- This is a freestanding (no hosted stdlib) environment — never assume libc/libstdc++ are available in kernel code
+- All kernel code must be position-independent or relocatable where required by the bootloader
+- Memory safety is critical — there is no OS safety net beneath this code
+- The OS must leave zero forensic artifacts on the host machine's storage

@@ -1,0 +1,30 @@
+---
+description: Build system and cross-compilation toolchain rules
+globs: "**/{Makefile,CMakeLists.txt,*.cmake,*.mk,*.ld,linker.ld}"
+alwaysApply: false
+---
+
+# Build System & Toolchain
+
+## Cross Compilation
+
+- Use a cross-compiler toolchain (e.g., `x86_64-elf-gcc`, `aarch64-none-elf-gcc`) — never build kernel code with the host compiler
+- Provide a custom linker script (`.ld`) for each target architecture to define memory layout, entry point, and section placement
+
+## ISO / Bootable Image
+
+- The build should produce a bootable ISO via `grub-mkrescue` or `xorriso` for x86 targets
+- ARM targets should produce a raw binary or U-Boot image
+- Add a `make iso` / `make image` target that builds the final bootable artifact
+
+## QEMU Testing
+
+- Provide `make run-x86`, `make run-x86_64`, `make run-arm` targets that launch QEMU with the correct machine flags
+- Use `-serial stdio` so kernel serial output is visible in the terminal
+- Use `-no-reboot -no-shutdown` during development so panics don't silently restart
+
+## Linker Script Conventions
+
+- `.text` section first, aligned to page boundary
+- `.rodata` after `.text`, read-only
+- `.data` and `.bss` last, with `__bss_start` / `__bss_end` symbols exported for zeroing in `_start`

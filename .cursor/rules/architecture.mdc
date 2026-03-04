@@ -1,0 +1,39 @@
+---
+description: Multi-architecture support rules for ARM and x86
+globs: "**/*.{cpp,cc,cxx,h,hpp,S,s,asm,ld}"
+alwaysApply: false
+---
+
+# Multi-Architecture Guidelines
+
+## Directory Layout
+
+Organise architecture-specific code under dedicated directories:
+
+```
+src/
+  arch/
+    x86/        # x86 32-bit
+    x86_64/     # x86 64-bit
+    arm/        # ARM 32-bit (AArch32)
+    aarch64/    # ARM 64-bit (AArch64)
+  kernel/       # Architecture-independent kernel code
+  vm/           # Virtualization abstraction layer
+```
+
+## Abstraction Rules
+
+- Define a common `arch_interface.h` that every architecture must implement (e.g., `arch_init()`, `arch_halt()`, `arch_enable_interrupts()`)
+- Never put x86 inline assembly in architecture-independent files — isolate it under `arch/x86*/`
+- Use `#if defined(__x86_64__)` / `#if defined(__aarch64__)` guards only in the arch shim layer, not in generic kernel code
+
+## Bootloader
+
+- x86/x86_64: target GRUB Multiboot2 or a custom stage-1/stage-2 bootloader
+- ARM: target U-Boot or a bare-metal entry point via device-tree
+- The bootloader must hand off a memory map and framebuffer info to the kernel entry point
+
+## Assembly Files
+
+- Use `.S` (capital S) for assembly files that need the C preprocessor
+- Comment every non-obvious instruction, especially privilege-level transitions and TLB flushes

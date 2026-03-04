@@ -1,0 +1,47 @@
+---
+description: C++ coding standards for bare-metal kernel development
+globs: "**/*.{cpp,cc,cxx,h,hpp}"
+alwaysApply: false
+---
+
+# C++ Kernel Coding Standards
+
+## Freestanding Environment
+
+- Use `-ffreestanding -fno-exceptions -fno-rtti` compiler flags
+- Do not include hosted headers (`<iostream>`, `<vector>`, etc.) — use `<stdint.h>`, `<stddef.h>`, `<stdarg.h>` only
+- Implement custom `memcpy`, `memset`, `memmove` if needed
+
+## Memory Management
+
+- All heap allocation must go through a custom allocator — never call `new`/`delete` without a backing allocator
+- Document ownership semantics in function signatures (who allocates, who frees)
+- Prefer stack allocation and fixed-size buffers in interrupt/exception handlers
+
+## Style
+
+- Use fixed-width types (`uint32_t`, `uintptr_t`) instead of `int`/`long` for hardware-facing code
+- Name registers, MMIO offsets, and hardware constants with `UPPER_SNAKE_CASE`
+- Prefix architecture-specific symbols: `x86_`, `arm_`, `arch_`
+- Keep ISR / interrupt handlers as short as possible — defer work to a bottom-half or task queue
+
+## Error Handling
+
+- No C++ exceptions — use return codes or a `Result<T, E>` style wrapper
+- Kernel panics should print diagnostics to the framebuffer/serial before halting
+
+## Example — fixed-width types and no exceptions
+
+```cpp
+// BAD
+int read_port(int port) {
+  throw std::runtime_error("fail");
+}
+
+// GOOD
+uint8_t x86_inb(uint16_t port) {
+  uint8_t result;
+  asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
+  return result;
+}
+```
