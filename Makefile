@@ -215,6 +215,10 @@ run-aarch64:
 GUEST_STAGING_HPA := 0x68000000
 GUEST_INITRD_HPA  := 0x70000000
 
+# Guest networking: pass through a QEMU virtio-net device.
+# Override QEMU_NET= (empty) on the command line to disable.
+QEMU_NET ?= -netdev user,id=net0 -device virtio-net-device,netdev=net0
+
 run-aarch64-vm:
 ifndef GUEST_KERNEL
 	$(error GUEST_KERNEL is required. Usage: make run-aarch64-vm GUEST_KERNEL=path/to/Image.iso)
@@ -225,6 +229,7 @@ endif
 		-kernel $(BIN)/zeroos-aarch64.elf \
 		-device loader,file=$(GUEST_KERNEL),addr=$(GUEST_STAGING_HPA),force-raw=on \
 		$(if $(GUEST_INITRD),-device loader$(comma)file=$(GUEST_INITRD)$(comma)addr=$(GUEST_INITRD_HPA)$(comma)force-raw=on) \
+		$(QEMU_NET) \
 		$(QEMU_COMMON)
 
 # ── Directory creation ───────────────────────────────────────────────

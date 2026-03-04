@@ -10,7 +10,7 @@
 // ── Guest memory layout ──────────────────────────────────────────────
 
 static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
-static constexpr uint64_t GUEST_RAM_IPA  = 0x40000000ULL;
+static constexpr uint64_t GUEST_RAM_IPA  = 0x48000000ULL;
 static constexpr uint64_t GUEST_RAM_MAX  = 512ULL * 1024 * 1024;
 
 // Ramdisk backing store sits immediately after guest RAM.
@@ -26,13 +26,12 @@ static constexpr uint64_t HCR_SWIO = (1ULL <<  1);
 static constexpr uint64_t HCR_FMO  = (1ULL <<  3);
 static constexpr uint64_t HCR_IMO  = (1ULL <<  4);
 static constexpr uint64_t HCR_AMO  = (1ULL <<  5);
-static constexpr uint64_t HCR_TWI  = (1ULL << 13);
 static constexpr uint64_t HCR_TSC  = (1ULL << 19);
 static constexpr uint64_t HCR_RW   = (1ULL << 31);
 
 static constexpr uint64_t HCR_GUEST =
     HCR_VM | HCR_SWIO | HCR_FMO | HCR_IMO | HCR_AMO |
-    HCR_TWI | HCR_TSC | HCR_RW;
+    HCR_TSC | HCR_RW;
 
 static constexpr uint64_t HCR_HYP = HCR_RW;
 
@@ -69,7 +68,6 @@ bool vgic_mmio_access(uint64_t ipa, bool is_write, uint32_t width,
 
 bool vuart_mmio_access(uint64_t ipa, bool is_write, uint32_t width,
                        uint64_t *val);
-void vuart_check_irq();
 void vuart_init();
 
 void vtimer_init();
@@ -193,6 +191,12 @@ Result<VM*> vm_create(uint64_t ram_size_bytes) {
     // UART is NOT mapped — accesses are trapped and emulated
     // (In Phase 2 test, UART was passthrough; now it's virtualised)
 
+    // Passthrough QEMU virtio-mmio transports (32 slots, 16 KiB)
+    if (!stage2_map_range_4k(vm, 0x0a000000, 0x0a000000, 0x4000, true)) {
+        kprintf("vm: failed to map virtio-mmio passthrough region\n");
+        return Result<VM*>::err(Error::OutOfMemory);
+    }
+
     // Initialise vCPU
     vm->vcpu.elr_el2   = vm->guest_ram_ipa;
     vm->vcpu.spsr_el2  = SPSR_EL1H_DAIF;
@@ -230,11 +234,7 @@ VmExit vm_run(VM *vm) {
 
     for (;;) {
         // Re-assert virtio-blk SPI if a completion is still pending.
-        // UART check is deliberately omitted here — the always-empty TX
-        // FIFO keeps TXRIS permanently set, and re-injecting the UART SPI
-        // on every guest entry floods the limited GICH List Registers,
-        // starving virtio-blk completions.  UART interrupts are re-asserted
-        // on WFI (below) and on actual events (DR write, RX data, IMSC change).
+        // UART interrupts are event-driven (DR write, RX data, IMSC change).
         virtio_blk_check_irq();
 
         write_hcr_el2(HCR_GUEST);
@@ -316,10 +316,8 @@ VmExit vm_run(VM *vm) {
         }
 
         case EC_WFI_WFE:
-            // Re-assert any level-triggered device IRQs so the guest
-            // doesn't sleep through a condition that is still active.
-            vuart_check_irq();
-            virtio_blk_check_irq();
+            // TWI is not set, so WFI no longer traps.  This path only
+            // fires for WFE (trapped if TWE were set) or as a safety net.
             vm->vcpu.elr_el2 += 4;
             continue;
 

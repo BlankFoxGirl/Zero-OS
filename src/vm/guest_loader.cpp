@@ -38,7 +38,7 @@ struct ZimgHeader {
 // These must match the values in vm.cpp.
 
 static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
-static constexpr uint64_t GUEST_RAM_IPA  = 0x40000000ULL;
+static constexpr uint64_t GUEST_RAM_IPA  = 0x48000000ULL;
 static constexpr uint64_t GUEST_RAM_SIZE = 512ULL * 1024 * 1024;
 
 // QEMU -device loader places the ISO/Image here (coincides with the ramdisk

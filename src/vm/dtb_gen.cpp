@@ -28,7 +28,7 @@ static constexpr uint32_t FDT_HEADER_SIZE = 40;
 
 // ── Simple FDT builder ───────────────────────────────────────────────
 
-static constexpr uint32_t STRUCT_MAX = 4096;
+static constexpr uint32_t STRUCT_MAX = 8192;
 static constexpr uint32_t STRINGS_MAX = 512;
 
 static uint8_t  s_struct[STRUCT_MAX];
@@ -151,7 +151,7 @@ uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
     fdt_end_node(); // cpus
 
     // ── memory ──
-    fdt_begin_node("memory@40000000");
+    fdt_begin_node("memory@48000000");
     fdt_prop_str("device_type", "memory");
     {
         uint32_t reg[] = {
@@ -221,19 +221,53 @@ uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
     }
     fdt_end_node(); // pl011
 
-    // ── virtio-mmio block device ──
-    fdt_begin_node("virtio_mmio@a000000");
+    // ── virtio-mmio block device (emulated by ZeroOS) ──
+    fdt_begin_node("virtio_mmio@b000000");
     fdt_prop_str("compatible", "virtio,mmio");
     {
-        uint32_t reg[] = { 0, 0x0A000000, 0, 0x200 };
+        uint32_t reg[] = { 0, 0x0B000000, 0, 0x200 };
         fdt_prop_cells("reg", reg, 4);
     }
     {
-        // SPI #16 → INTID 48, edge-triggered (0x1)
-        uint32_t interrupts[] = { 0, 16, 1 };
+        // SPI #20 → INTID 52, edge-triggered (0x1)
+        uint32_t interrupts[] = { 0, 20, 1 };
         fdt_prop_cells("interrupts", interrupts, 3);
     }
-    fdt_end_node(); // virtio_mmio
+    fdt_end_node(); // virtio_mmio (blk)
+
+    // ── virtio-mmio passthrough (all 32 QEMU transport slots) ──
+    // QEMU virt allocates devices from the highest slot downward, so we
+    // must declare every slot for Linux to find devices at any position.
+    for (uint32_t slot = 0; slot < 32; slot++) {
+        uint32_t addr = 0x0A000000 + slot * 0x200;
+        uint32_t spi  = 16 + slot;
+
+        // Build node name "virtio_mmio@XXXXXXX"
+        static const char hex[] = "0123456789abcdef";
+        char name[32] = "virtio_mmio@";
+        int p = 12;
+        bool started = false;
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            uint32_t nibble = (addr >> shift) & 0xF;
+            if (nibble || started || shift == 0) {
+                name[p++] = hex[nibble];
+                started = true;
+            }
+        }
+        name[p] = '\0';
+
+        fdt_begin_node(name);
+        fdt_prop_str("compatible", "virtio,mmio");
+        {
+            uint32_t reg[] = { 0, addr, 0, 0x200 };
+            fdt_prop_cells("reg", reg, 4);
+        }
+        {
+            uint32_t interrupts[] = { 0, spi, 1 };
+            fdt_prop_cells("interrupts", interrupts, 3);
+        }
+        fdt_end_node();
+    }
 
     // ── fixed clock (for UART) ──
     fdt_begin_node("apb-pclk");
@@ -248,7 +282,8 @@ uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
     fdt_begin_node("chosen");
     fdt_prop_str("stdout-path", "/pl011@9000000");
     fdt_prop_str("bootargs",
-                 "console=ttyAMA0 earlycon=pl011,0x09000000 loglevel=8");
+                 "console=ttyAMA0 earlycon=pl011,0x09000000 loglevel=8"
+                 " ip=dhcp");
 
     if (initrd_start && initrd_end > initrd_start) {
         fdt_prop_u64("linux,initrd-start", initrd_start);

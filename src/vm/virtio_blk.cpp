@@ -6,7 +6,7 @@
 
 // ── virtio-mmio transport constants (virtio v1.2, §4.2.2) ────────────
 
-static constexpr uint64_t VIRTIO_MMIO_IPA  = 0x0A000000ULL;
+static constexpr uint64_t VIRTIO_MMIO_IPA  = 0x0B000000ULL;
 static constexpr uint64_t VIRTIO_MMIO_SIZE = 0x200ULL;
 
 static constexpr uint32_t VIRTIO_MAGIC   = 0x74726976;  // "virt"
@@ -137,7 +137,7 @@ static struct {
 } vblk;
 
 // SPI number for the virtio-blk interrupt (INTID = spi + 32 = 48)
-static constexpr uint32_t VIRTIO_BLK_SPI = 16;
+static constexpr uint32_t VIRTIO_BLK_SPI = 20;
 
 extern void vgic_inject_spi(uint32_t spi_num);
 
