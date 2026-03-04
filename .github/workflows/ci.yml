@@ -1,0 +1,41 @@
+name: Makefile CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, x86_64, arm, aarch64]
+        include:
+          - arch: x86
+            cross: i686-linux-gnu-
+            packages: gcc-i686-linux-gnu g++-i686-linux-gnu
+          - arch: x86_64
+            cross: ""
+            packages: ""
+          - arch: arm
+            cross: arm-none-eabi-
+            packages: gcc-arm-none-eabi
+          - arch: aarch64
+            cross: aarch64-linux-gnu-
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install cross-compiler toolchain
+      if: matrix.packages != ''
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ matrix.packages }}
+
+    - name: Build kernel
+      run: make ARCH=${{ matrix.arch }} CROSS=${{ matrix.cross }} kernel
