@@ -196,10 +196,13 @@ run-arm:
 	@$(MAKE) --no-print-directory ARCH=arm kernel
 	qemu-system-arm -M virt -kernel $(BIN)/zeroos-arm.elf $(QEMU_COMMON)
 
+# QEMU RAM in MiB (override on the command line: make run-aarch64 QEMU_RAM=4096)
+QEMU_RAM ?= 2048
+
 run-aarch64:
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
 	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
-		-cpu cortex-a57 -m 2048 \
+		-cpu cortex-a57 -m $(QEMU_RAM) \
 		-kernel $(BIN)/zeroos-aarch64.elf $(QEMU_COMMON)
 
 # Boot an aarch64 guest inside the ZeroOS VM.
@@ -207,14 +210,13 @@ run-aarch64:
 #   make run-aarch64-vm GUEST_KERNEL=path/to/alpine.iso
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image              (raw kernel)
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
+#   make run-aarch64-vm GUEST_KERNEL=path/to/alpine.iso QEMU_RAM=4096
 #
-# The guest image (ISO or raw kernel) is loaded into the ramdisk backing
-# region at HPA 0x68000000.  After the guest loader copies the kernel
-# and initramfs into guest RAM, the ISO content stays in place and is
-# exposed to the guest via a virtio-blk device (RAM-backed virtual disk).
+# The guest staging address is computed from QEMU_RAM to match the kernel's
+# dynamic memory layout: RAM_BASE(0x40000000) + 128 MiB ZeroOS + 25% guest RAM.
 
-GUEST_STAGING_HPA := 0x68000000
-GUEST_INITRD_HPA  := 0x70000000
+GUEST_STAGING_HPA = $(shell printf '0x%x' $$(( 0x40000000 + 128 * 1048576 + $(QEMU_RAM) / 4 * 1048576 )))
+GUEST_INITRD_HPA  = $(shell printf '0x%x' $$(( 0x40000000 + 128 * 1048576 + $(QEMU_RAM) / 4 * 1048576 + 128 * 1048576 )))
 
 # Guest networking: pass through a QEMU virtio-net device.
 # Override QEMU_NET= (empty) on the command line to disable.
@@ -226,7 +228,7 @@ ifndef GUEST_KERNEL
 endif
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
 	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
-		-cpu cortex-a57 -m 2048 \
+		-cpu cortex-a57 -m $(QEMU_RAM) \
 		-kernel $(BIN)/zeroos-aarch64.elf \
 		-device loader,file=$(GUEST_KERNEL),addr=$(GUEST_STAGING_HPA),force-raw=on \
 		$(if $(GUEST_INITRD),-device loader$(comma)file=$(GUEST_INITRD)$(comma)addr=$(GUEST_INITRD_HPA)$(comma)force-raw=on) \

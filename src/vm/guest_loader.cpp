@@ -34,24 +34,12 @@ struct ZimgHeader {
     char     comp_type[4];     // "gzip", "lz4", etc.
 };
 
-// ── Memory layout constants ──────────────────────────────────────────
-// These must match the values in vm.cpp.
-
-static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
-static constexpr uint64_t GUEST_RAM_IPA  = 0x48000000ULL;
-static constexpr uint64_t GUEST_RAM_SIZE = 512ULL * 1024 * 1024;
-
-// QEMU -device loader places the ISO/Image here (coincides with the ramdisk
-// backing region so the ISO content persists on the virtio-blk device).
-static constexpr uint64_t STAGING_HPA = 0x68000000ULL;
+// Memory layout is now dynamic — addresses come from the VM struct
+// which is populated by compute_memory_layout() during kernel init.
 
 static constexpr uint64_t DEFAULT_TEXT_OFFSET = 0x80000;
-
-// DTB near top of guest RAM
-static constexpr uint64_t DTB_OFFSET   = GUEST_RAM_SIZE - (1ULL * 1024 * 1024);
-static constexpr uint32_t DTB_MAX_SIZE = 64 * 1024;
-
-static constexpr uint64_t SPSR_EL1H_DAIF = 0x3C5;
+static constexpr uint32_t DTB_MAX_SIZE       = 64 * 1024;
+static constexpr uint64_t SPSR_EL1H_DAIF     = 0x3C5;
 
 // Forward declaration (dtb_gen.cpp)
 uint32_t dtb_generate(void *out_buf, uint32_t buf_size,
@@ -165,8 +153,8 @@ static bool classify_kernel(const void *data, uint64_t size,
     return false;
 }
 
-static bool detect_iso(GuestImages *img) {
-    auto *staging = reinterpret_cast<const void *>(STAGING_HPA);
+static bool detect_iso(uint64_t staging_hpa, GuestImages *img) {
+    auto *staging = reinterpret_cast<const void *>(staging_hpa);
 
     if (!iso_is_valid(staging))
         return false;
@@ -235,8 +223,8 @@ static bool detect_iso(GuestImages *img) {
     return true;
 }
 
-static bool detect_raw_image(GuestImages *img) {
-    auto *staging = reinterpret_cast<const void *>(STAGING_HPA);
+static bool detect_raw_image(uint64_t staging_hpa, GuestImages *img) {
+    auto *staging = reinterpret_cast<const void *>(staging_hpa);
 
     if (!classify_kernel(staging, 0, img))
         return false;
@@ -254,8 +242,8 @@ static bool detect_raw_image(GuestImages *img) {
 // header or ISO9660 PVD from the staging area.  Falls back to
 // |fallback_size| when neither structure is found.
 
-uint64_t detect_iso_disk_size(uint64_t fallback_size) {
-    auto *staging = reinterpret_cast<const uint8_t *>(STAGING_HPA);
+uint64_t detect_iso_disk_size(uint64_t staging_hpa, uint64_t fallback_size) {
+    auto *staging = reinterpret_cast<const uint8_t *>(staging_hpa);
 
     // GPT primary header lives at LBA 1 (byte offset 512)
     const uint8_t *gpt = staging + 512;
@@ -289,8 +277,8 @@ uint64_t detect_iso_disk_size(uint64_t fallback_size) {
 
 // ── Load images into guest RAM ───────────────────────────────────────
 
-bool vm_has_linux_image() {
-    auto *staging = reinterpret_cast<const void *>(STAGING_HPA);
+bool vm_has_linux_image(uint64_t staging_hpa) {
+    auto *staging = reinterpret_cast<const void *>(staging_hpa);
 
     if (iso_is_valid(staging))
         return true;
@@ -301,11 +289,16 @@ bool vm_has_linux_image() {
 
 bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
                           uint64_t *out_initrd_size) {
-    UNUSED(vm);
     GuestImages img{};
 
-    if (!detect_iso(&img) && !detect_raw_image(&img))
+    if (!detect_iso(vm->ramdisk_hpa, &img) &&
+        !detect_raw_image(vm->ramdisk_hpa, &img))
         return false;
+
+    uint64_t ram_hpa = vm->guest_ram_hpa;
+    uint64_t ram_ipa = vm->guest_ram_ipa;
+    uint64_t ram_sz  = vm->guest_ram_size;
+    uint64_t dtb_off = ram_sz - (1ULL * 1024 * 1024);
 
     uint64_t text_offset = img.text_offset;
 
@@ -314,8 +307,8 @@ bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
         const void *gz_data = src + img.payload_offset;
         uint64_t gz_len     = img.payload_size;
 
-        void *dst = reinterpret_cast<void *>(GUEST_RAM_HPA + text_offset);
-        uint64_t cap = DTB_OFFSET - text_offset;
+        void *dst = reinterpret_cast<void *>(ram_hpa + text_offset);
+        uint64_t cap = dtb_off - text_offset;
 
         kprintf("  decompressing kernel (%u KiB gzip)...\n",
                 (unsigned)(gz_len / 1024));
@@ -327,10 +320,9 @@ bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
 
         kprintf("  decompressed %llu KiB -> HPA 0x%llx (IPA 0x%llx)\n",
                 (unsigned long long)(decompressed / 1024),
-                (unsigned long long)(GUEST_RAM_HPA + text_offset),
-                (unsigned long long)(GUEST_RAM_IPA + text_offset));
+                (unsigned long long)(ram_hpa + text_offset),
+                (unsigned long long)(ram_ipa + text_offset));
 
-        // Verify the decompressed image has the ARM64 magic
         Arm64ImageHeader hdr{};
         if (check_arm64_magic(dst, &hdr)) {
             if (hdr.text_offset && hdr.text_offset != text_offset) {
@@ -340,20 +332,19 @@ bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
             }
         }
     } else {
-        uintptr_t kernel_dst = GUEST_RAM_HPA + text_offset;
+        uintptr_t kernel_dst = ram_hpa + text_offset;
         memcpy(reinterpret_cast<void *>(kernel_dst),
                img.kernel, static_cast<size_t>(img.kernel_size));
         kprintf("  loaded kernel at HPA 0x%llx (IPA 0x%llx)\n",
                 (unsigned long long)kernel_dst,
-                (unsigned long long)(GUEST_RAM_IPA + text_offset));
+                (unsigned long long)(ram_ipa + text_offset));
     }
 
     if (img.initrd && img.initrd_size > 0) {
-        // Place initrd after the kernel area, 2 MiB aligned
-        uint64_t initrd_offset = GUEST_RAM_SIZE / 2;
-        uintptr_t initrd_dst = GUEST_RAM_HPA + initrd_offset;
+        uint64_t initrd_offset = ram_sz / 2;
+        uintptr_t initrd_dst = ram_hpa + initrd_offset;
 
-        if (initrd_offset + img.initrd_size > DTB_OFFSET) {
+        if (initrd_offset + img.initrd_size > dtb_off) {
             kprintf("guest_loader: initrd too large for guest RAM\n");
             return false;
         }
@@ -361,11 +352,11 @@ bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
         memcpy(reinterpret_cast<void *>(initrd_dst),
                img.initrd, static_cast<size_t>(img.initrd_size));
 
-        *out_initrd_ipa  = GUEST_RAM_IPA + initrd_offset;
+        *out_initrd_ipa  = ram_ipa + initrd_offset;
         *out_initrd_size = img.initrd_size;
         kprintf("  loaded initrd at HPA 0x%llx (IPA 0x%llx, %llu KiB)\n",
                 (unsigned long long)initrd_dst,
-                (unsigned long long)(GUEST_RAM_IPA + initrd_offset),
+                (unsigned long long)(ram_ipa + initrd_offset),
                 (unsigned long long)(img.initrd_size / 1024));
     } else {
         *out_initrd_ipa  = 0;
@@ -376,7 +367,12 @@ bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
 }
 
 bool vm_boot_linux(VM *vm, uint64_t initrd_ipa, uint64_t initrd_size) {
-    uintptr_t kernel_hpa = GUEST_RAM_HPA + DEFAULT_TEXT_OFFSET;
+    uint64_t ram_hpa = vm->guest_ram_hpa;
+    uint64_t ram_ipa = vm->guest_ram_ipa;
+    uint64_t ram_sz  = vm->guest_ram_size;
+    uint64_t dtb_off = ram_sz - (1ULL * 1024 * 1024);
+
+    uintptr_t kernel_hpa = ram_hpa + DEFAULT_TEXT_OFFSET;
     Arm64ImageHeader hdr{};
     if (!check_arm64_magic(reinterpret_cast<const void *>(kernel_hpa), &hdr)) {
         kprintf("guest_loader: no arm64 Image in guest RAM at HPA 0x%llx\n",
@@ -388,10 +384,10 @@ bool vm_boot_linux(VM *vm, uint64_t initrd_ipa, uint64_t initrd_size) {
     if (text_offset == 0)
         text_offset = DEFAULT_TEXT_OFFSET;
 
-    uint64_t kernel_ipa = GUEST_RAM_IPA + text_offset;
+    uint64_t kernel_ipa = ram_ipa + text_offset;
 
-    uint64_t dtb_ipa  = GUEST_RAM_IPA + DTB_OFFSET;
-    uintptr_t dtb_hpa = GUEST_RAM_HPA + DTB_OFFSET;
+    uint64_t  dtb_ipa = ram_ipa + dtb_off;
+    uintptr_t dtb_hpa = ram_hpa + dtb_off;
 
     uint64_t initrd_start = 0, initrd_end = 0;
     if (initrd_ipa && initrd_size > 0) {
@@ -401,7 +397,7 @@ bool vm_boot_linux(VM *vm, uint64_t initrd_ipa, uint64_t initrd_size) {
 
     uint32_t dtb_size = dtb_generate(
         reinterpret_cast<void *>(dtb_hpa), DTB_MAX_SIZE,
-        GUEST_RAM_IPA, GUEST_RAM_SIZE,
+        ram_ipa, ram_sz,
         initrd_start, initrd_end);
 
     if (dtb_size == 0) {

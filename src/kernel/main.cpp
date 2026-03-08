@@ -3,7 +3,7 @@
 #include "memory.h"
 #include "arch_interface.h"
 
-extern "C" void vm_run_test_guest();
+extern "C" void vm_run_test_guest(const MemoryLayout *layout);
 
 static const char *memory_type_str(uint32_t type) {
     switch (type) {
@@ -16,6 +16,36 @@ static const char *memory_type_str(uint32_t type) {
     }
 }
 
+static constexpr uint64_t ZEROOS_RESERVED = 128ULL * 1024 * 1024;
+static constexpr uint64_t BLOCK_2M        = 2ULL * 1024 * 1024;
+
+MemoryLayout compute_memory_layout(uint64_t ram_base, uint64_t total_ram) {
+    MemoryLayout layout{};
+    layout.ram_base    = ram_base;
+    layout.total_ram   = total_ram;
+    layout.zeroos_size = ZEROOS_RESERVED;
+
+    if (total_ram <= ZEROOS_RESERVED) {
+        layout.guest_ram_hpa  = ram_base + ZEROOS_RESERVED;
+        layout.guest_ram_ipa  = layout.guest_ram_hpa;
+        layout.guest_ram_size = 0;
+        layout.ramdisk_hpa    = layout.guest_ram_hpa;
+        layout.ramdisk_size   = 0;
+        return layout;
+    }
+
+    uint64_t guest_ram = ALIGN_DOWN(total_ram / 4, BLOCK_2M);
+    uint64_t remaining = total_ram - ZEROOS_RESERVED - guest_ram;
+
+    layout.guest_ram_hpa  = ram_base + ZEROOS_RESERVED;
+    layout.guest_ram_ipa  = layout.guest_ram_hpa;
+    layout.guest_ram_size = guest_ram;
+    layout.ramdisk_hpa    = layout.guest_ram_hpa + guest_ram;
+    layout.ramdisk_size   = remaining;
+
+    return layout;
+}
+
 [[noreturn]] void kernel_start(const BootInfo &info) {
     kprintf("\n");
     kprintf("========================================\n");
@@ -23,7 +53,7 @@ static const char *memory_type_str(uint32_t type) {
     kprintf("  Architecture: %s\n", info.arch_name);
     kprintf("========================================\n\n");
 
-    kprintf("Memory map (%u regions):\n", info.memory_region_count);
+    kprintf("Memory map (%u regions, PMM-managed):\n", info.memory_region_count);
     uint64_t total_available = 0;
     for (uint32_t i = 0; i < info.memory_region_count; i++) {
         const auto &r = info.memory_regions[i];
@@ -39,6 +69,27 @@ static const char *memory_type_str(uint32_t type) {
     kprintf("  Total available: %llu KiB (%llu MiB)\n\n",
             (unsigned long long)(total_available / 1024),
             (unsigned long long)(total_available / (1024 * 1024)));
+
+    kprintf("Host RAM detected: %llu MiB at 0x%llx\n",
+            (unsigned long long)(info.total_ram / (1024 * 1024)),
+            (unsigned long long)info.ram_base);
+
+    MemoryLayout layout = compute_memory_layout(info.ram_base, info.total_ram);
+
+    kprintf("\nMemory allocation:\n");
+    kprintf("  ZeroOS kernel : %llu MiB  [0x%llx - 0x%llx)\n",
+            (unsigned long long)(layout.zeroos_size / (1024 * 1024)),
+            (unsigned long long)layout.ram_base,
+            (unsigned long long)(layout.ram_base + layout.zeroos_size));
+    kprintf("  Guest OS RAM  : %llu MiB  [0x%llx - 0x%llx)  (25%%)\n",
+            (unsigned long long)(layout.guest_ram_size / (1024 * 1024)),
+            (unsigned long long)layout.guest_ram_hpa,
+            (unsigned long long)(layout.guest_ram_hpa + layout.guest_ram_size));
+    kprintf("  Guest OS Disk : %llu MiB  [0x%llx - 0x%llx)\n",
+            (unsigned long long)(layout.ramdisk_size / (1024 * 1024)),
+            (unsigned long long)layout.ramdisk_hpa,
+            (unsigned long long)(layout.ramdisk_hpa + layout.ramdisk_size));
+    kprintf("\n");
 
     pmm::init(info);
     kprintf("Physical memory manager initialised.\n");
@@ -61,7 +112,7 @@ static const char *memory_type_str(uint32_t type) {
 
     kprintf("\nKernel initialisation complete.\n");
 
-    vm_run_test_guest();
+    vm_run_test_guest(&layout);
 
     kprintf("System halting.\n");
     arch_halt();

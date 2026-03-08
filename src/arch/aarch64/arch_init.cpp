@@ -73,15 +73,43 @@ void hyp_exception_handler(uint64_t type, uint64_t esr,
     arch_halt();
 }
 
+// ── Memory probing ───────────────────────────────────────────────────
+// probe_readable (vectors.S) does a single LDR; the exception handler
+// catches data aborts during probes and skips them gracefully.
+
+extern "C" volatile uint8_t g_probe_active;
+extern "C" volatile uint8_t g_probe_faulted;
+
+volatile uint8_t g_probe_active  = 0;
+volatile uint8_t g_probe_faulted = 0;
+
+extern "C" int probe_readable(uint64_t addr);
+
 // ── Entry point (called from boot_aarch64.S) ─────────────────────────
 
-constexpr uint64_t QEMU_VIRT_RAM_BASE = 0x40000000;
-constexpr uint64_t HYP_RAM_SIZE       = 128ULL * 1024 * 1024;
+static constexpr uint64_t QEMU_VIRT_RAM_BASE  = 0x40000000;
+static constexpr uint64_t ZEROOS_RESERVED_SIZE = 128ULL * 1024 * 1024;
+static constexpr uint64_t PROBE_STEP           = 2ULL * 1024 * 1024; // 2 MiB
 
 static uint64_t read_current_el() {
     uint64_t val;
     asm volatile("mrs %0, CurrentEL" : "=r"(val));
     return (val >> 2) & 0x3;
+}
+
+// Probe physical memory upward from ram_base in PROBE_STEP increments.
+// Returns the total amount of contiguous RAM starting at ram_base.
+static uint64_t detect_ram_size(uint64_t ram_base) {
+    static constexpr uint64_t MAX_PROBE = 8ULL * 1024 * 1024 * 1024;
+
+    uint64_t size = PROBE_STEP;
+    while (size < MAX_PROBE) {
+        uint64_t addr = ram_base + size;
+        if (!probe_readable(addr))
+            break;
+        size += PROBE_STEP;
+    }
+    return size;
 }
 
 extern "C" [[noreturn]]
@@ -97,10 +125,21 @@ void kernel_main(uint64_t dtb_addr) {
         arch_halt();
     }
 
+    kprintf("[boot] Probing RAM...\n");
+    uint64_t total_ram = detect_ram_size(QEMU_VIRT_RAM_BASE);
+    kprintf("[boot] Detected %llu MiB RAM at 0x%llx\n",
+            (unsigned long long)(total_ram / (1024 * 1024)),
+            (unsigned long long)QEMU_VIRT_RAM_BASE);
+
     BootInfo info{};
     info.arch_name           = "AArch64 (EL2 Hypervisor)";
+    info.ram_base            = QEMU_VIRT_RAM_BASE;
+    info.total_ram           = total_ram;
+
+    // The PMM only manages the ZeroOS-reserved portion (first 128 MiB).
+    // Guest RAM and ramdisk are carved out separately by the VM subsystem.
     info.memory_region_count = 1;
-    info.memory_regions[0]   = { QEMU_VIRT_RAM_BASE, HYP_RAM_SIZE,
+    info.memory_regions[0]   = { QEMU_VIRT_RAM_BASE, ZEROOS_RESERVED_SIZE,
                                  MEMORY_AVAILABLE };
 
     kernel_start(info);

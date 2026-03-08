@@ -7,17 +7,8 @@
 
 #ifdef __aarch64__
 
-// ── Guest memory layout ──────────────────────────────────────────────
-
-static constexpr uint64_t GUEST_RAM_HPA  = 0x48000000ULL;
-static constexpr uint64_t GUEST_RAM_IPA  = 0x48000000ULL;
-static constexpr uint64_t GUEST_RAM_MAX  = 512ULL * 1024 * 1024;
-
-// Ramdisk backing store sits immediately after guest RAM.
-// With 2048 MiB total (0x40000000..0xC0000000) and 128 MiB for ZeroOS + 512 MiB
-// for guest RAM, the remaining ~1408 MiB is available for the ramdisk.
-static constexpr uint64_t RAMDISK_HPA  = GUEST_RAM_HPA + GUEST_RAM_MAX;  // 0x68000000
-static constexpr uint64_t RAMDISK_SIZE = 1408ULL * 1024 * 1024;          // ~1.375 GiB
+// Guest memory layout is now computed dynamically from the detected host
+// RAM and passed in via MemoryLayout.  See compute_memory_layout() in main.cpp.
 
 // ── HCR_EL2 bit definitions ─────────────────────────────────────────
 
@@ -151,18 +142,18 @@ void vm_init() {
     vuart_init();
 }
 
-Result<VM*> vm_create(uint64_t ram_size_bytes) {
-    if (ram_size_bytes > GUEST_RAM_MAX)
+Result<VM*> vm_create(const MemoryLayout *layout) {
+    if (!layout || layout->guest_ram_size == 0)
         return Result<VM*>::err(Error::InvalidArgument);
 
     VM *vm = &the_vm;
     memset(vm, 0, sizeof(VM));
 
-    vm->guest_ram_hpa  = GUEST_RAM_HPA;
-    vm->guest_ram_ipa  = GUEST_RAM_IPA;
-    vm->guest_ram_size = ram_size_bytes;
-    vm->ramdisk_hpa    = RAMDISK_HPA;
-    vm->ramdisk_size   = RAMDISK_SIZE;
+    vm->guest_ram_hpa  = layout->guest_ram_hpa;
+    vm->guest_ram_ipa  = layout->guest_ram_ipa;
+    vm->guest_ram_size = layout->guest_ram_size;
+    vm->ramdisk_hpa    = layout->ramdisk_hpa;
+    vm->ramdisk_size   = layout->ramdisk_size;
     vm->vmid           = 1;
     vm->state          = VmState::Created;
 
@@ -203,9 +194,12 @@ Result<VM*> vm_create(uint64_t ram_size_bytes) {
     vm->vcpu.cpacr_el1 = (3ULL << 20);   // FP/SIMD at EL1
 
     kprintf("vm: created — %llu MiB guest RAM at IPA 0x%llx (HPA 0x%llx)\n",
-            (unsigned long long)(ram_size_bytes / (1024 * 1024)),
+            (unsigned long long)(vm->guest_ram_size / (1024 * 1024)),
             (unsigned long long)vm->guest_ram_ipa,
             (unsigned long long)vm->guest_ram_hpa);
+    kprintf("vm: ramdisk %llu MiB at HPA 0x%llx\n",
+            (unsigned long long)(vm->ramdisk_size / (1024 * 1024)),
+            (unsigned long long)vm->ramdisk_hpa);
 
     return Result<VM*>::ok(vm);
 }
@@ -356,10 +350,10 @@ void vm_destroy(VM *vm) {
 // ── Forward declarations (guest_loader.cpp) ──────────────────────────
 
 bool vm_boot_linux(VM *vm, uint64_t initrd_ipa, uint64_t initrd_size);
-bool vm_has_linux_image();
+bool vm_has_linux_image(uint64_t staging_hpa);
 bool vm_load_guest_images(VM *vm, uint64_t *out_initrd_ipa,
                           uint64_t *out_initrd_size);
-uint64_t detect_iso_disk_size(uint64_t fallback_size);
+uint64_t detect_iso_disk_size(uint64_t staging_hpa, uint64_t fallback_size);
 
 // ── Run the VM (test guest or Linux) ─────────────────────────────────
 
@@ -376,19 +370,19 @@ static const char *exit_reason_str(VmExitReason r) {
 }
 
 extern "C"
-void vm_run_test_guest() {
+void vm_run_test_guest(const MemoryLayout *layout) {
     kprintf("\n--- VM Initialisation ---\n");
 
     vm_init();
 
-    auto r = vm_create(GUEST_RAM_MAX);
+    auto r = vm_create(layout);
     if (r.is_err()) {
         kprintf("vm: create failed\n");
         return;
     }
     VM *vm = r.value();
 
-    if (vm_has_linux_image()) {
+    if (vm_has_linux_image(vm->ramdisk_hpa)) {
         kprintf("vm: guest image detected in staging area, loading...\n");
 
         uint64_t initrd_ipa  = 0;
@@ -399,9 +393,8 @@ void vm_run_test_guest() {
             return;
         }
 
-        // Initialise the RAM-backed virtual disk.  Use the ISO's actual
-        // disk size so the GPT backup header location is consistent.
-        uint64_t disk_size = detect_iso_disk_size(vm->ramdisk_size);
+        uint64_t disk_size = detect_iso_disk_size(vm->ramdisk_hpa,
+                                                  vm->ramdisk_size);
         virtio_blk_init(vm->ramdisk_hpa, disk_size,
                         vm->guest_ram_hpa, vm->guest_ram_ipa);
 
@@ -436,6 +429,6 @@ void vm_run_test_guest() {
 #else /* !__aarch64__ */
 
 void vm_init() {}
-extern "C" void vm_run_test_guest() {}
+extern "C" void vm_run_test_guest(const MemoryLayout *) {}
 
 #endif
