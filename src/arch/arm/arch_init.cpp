@@ -1,5 +1,6 @@
 #include "arch_interface.h"
 #include "boot_info.h"
+#include "console.h"
 #include "string.h"
 
 // ── PL011 UART (QEMU virt) ──────────────────────────────────────────
@@ -39,8 +40,43 @@ char arch_serial_getchar() {
     return static_cast<char>(mmio_read32(UART_DR) & 0xFF);
 }
 
+extern "C" void arm_vector_table();
+
+static void arm_install_vectors() {
+    uint32_t vbar = reinterpret_cast<uint32_t>(&arm_vector_table);
+    asm volatile("mcr p15, 0, %0, c12, c0, 0" : : "r"(vbar));
+}
+
 void arch_early_init() {
     // PL011 is pre-initialised by QEMU / firmware
+    arm_install_vectors();
+}
+
+// ── Exception handler (called from vectors.S) ───────────────────────
+
+static const char *exception_type_name(uint32_t type) {
+    static const char *names[] = {
+        "Reset",
+        "Undefined Instruction",
+        "Supervisor Call (SWI)",
+        "Prefetch Abort",
+        "Data Abort",
+        "Reserved",
+        "IRQ",
+        "FIQ",
+    };
+    if (type < 8) return names[type];
+    return "Unknown";
+}
+
+extern "C"
+void arm_exception_handler(uint32_t type, uint32_t lr, uint32_t spsr) {
+    kprintf("\n*** ARM EXCEPTION ***\n");
+    kprintf("  Type : #%u  %s\n", type, exception_type_name(type));
+    kprintf("  LR   : 0x%08x\n", lr);
+    kprintf("  SPSR : 0x%08x\n", spsr);
+
+    arch_halt();
 }
 
 [[noreturn]] void arch_halt() {
@@ -60,6 +96,8 @@ void kernel_main(uint32_t dtb_addr) {
 
     BootInfo info{};
     info.arch_name           = "ARM (AArch32)";
+    info.ram_base            = QEMU_VIRT_RAM_BASE;
+    info.total_ram           = QEMU_VIRT_RAM_SIZE;
     info.memory_region_count = 1;
     info.memory_regions[0]   = { QEMU_VIRT_RAM_BASE, QEMU_VIRT_RAM_SIZE,
                                  MEMORY_AVAILABLE };

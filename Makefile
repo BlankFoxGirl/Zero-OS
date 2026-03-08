@@ -69,6 +69,7 @@ CXXFLAGS := -ffreestanding -std=c++17 $(WARNINGS) $(INCLUDES) $(DEPFLAGS) \
             -fno-exceptions -fno-rtti $(ARCHFLAGS)
 ASFLAGS  := -ffreestanding $(INCLUDES) $(ARCHFLAGS)
 LDFLAGS  := -nostdlib -T $(LDSCRIPT)
+LIBGCC   := $(shell $(CC) $(ARCHFLAGS) -print-libgcc-file-name)
 
 ifdef DEBUG
   CFLAGS   += -g -O0
@@ -106,7 +107,7 @@ DEPS := $(OBJS:.o=.d)
 
 # ── Phony targets ───────────────────────────────────────────────────
 
-.PHONY: kernel iso image iso-store clean all \
+.PHONY: kernel iso image iso-store usb clean all \
         run-x86 run-x86_64 run-arm run-aarch64 run-aarch64-vm
 
 # ── Default target ───────────────────────────────────────────────────
@@ -123,7 +124,7 @@ all:
 # ── Link ─────────────────────────────────────────────────────────────
 
 $(TARGET): $(OBJS) $(LDSCRIPT) | $(BIN)
-	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(LIBGCC)
 
 # ── Compile / assemble rules ────────────────────────────────────────
 
@@ -170,6 +171,75 @@ iso: kernel
 	$(CROSS)grub-mkrescue -o $(ISO) $(BUILD)/isodir
 	@echo "[$(ARCH)] ISO ready: $(ISO)"
 
+# ── USB deployment (all architectures) ───────────────────────────────
+#
+# Deploy ZeroOS to a partitioned USB stick.
+#
+# Prerequisites:
+#   The USB must have two GPT partitions:
+#     Partition 1 (FAT32, ~1 GB)  — EFI/boot partition, mounted at USB_BOOT
+#     Partition 2 (FAT32, rest)   — ISO store,           mounted at USB_ISO
+#   Requires: x86_64-elf-grub-mkstandalone (from x86_64-elf-grub)
+#
+# Usage:
+#   make usb USB_BOOT=/Volumes/ZEROOS_BOOT USB_ISO=/Volumes/ZEROOS_ISO
+#
+# This target:
+#   1. Builds kernels for all architectures
+#   2. Builds a standalone GRUB EFI binary (BOOTX64.EFI)
+#   3. Copies EFI binary + all kernel ELFs to the boot partition
+#   4. Generates grub.cfg with module2 lines for each ISO on USB_ISO
+
+USB_BOOT ?=
+USB_ISO  ?=
+
+usb:
+ifndef USB_BOOT
+	$(error USB_BOOT is required. Usage: make usb USB_BOOT=/Volumes/ZEROOS_BOOT USB_ISO=/Volumes/ZEROOS_ISO)
+endif
+ifndef USB_ISO
+	$(error USB_ISO is required. Usage: make usb USB_BOOT=/Volumes/ZEROOS_BOOT USB_ISO=/Volumes/ZEROOS_ISO)
+endif
+	@if [ ! -d "$(USB_BOOT)" ]; then \
+		echo "Error: USB_BOOT='$(USB_BOOT)' is not mounted or does not exist"; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(USB_ISO)" ]; then \
+		echo "Error: USB_ISO='$(USB_ISO)' is not mounted or does not exist"; \
+		exit 1; \
+	fi
+	@echo "[usb] Building kernels for all architectures..."
+	@$(MAKE) --no-print-directory all
+	@echo "[usb] Building standalone GRUB EFI bootloader..."
+	@mkdir -p build/efi_staging
+	@printf 'search --set=root --file /boot/zeroos-x86_64.elf\nconfigfile /boot/grub/grub.cfg\n' \
+		> build/efi_staging/grub_embed.cfg
+	x86_64-elf-grub-mkstandalone --format=x86_64-efi \
+		--modules="part_gpt part_msdos fat normal search configfile" \
+		--output=build/efi_staging/BOOTX64.EFI \
+		--locales="" --fonts="" \
+		"boot/grub/grub.cfg=build/efi_staging/grub_embed.cfg"
+	@mkdir -p "$(USB_BOOT)/EFI/BOOT"
+	@mkdir -p "$(USB_BOOT)/boot/grub"
+	@cp build/efi_staging/BOOTX64.EFI "$(USB_BOOT)/EFI/BOOT/BOOTX64.EFI"
+	@echo "[usb] Copying kernels (all architectures)..."
+	@cp $(BIN)/zeroos-x86_64.elf  "$(USB_BOOT)/boot/zeroos-x86_64.elf"
+	@cp $(BIN)/zeroos-x86.elf     "$(USB_BOOT)/boot/zeroos-x86.elf"
+	@cp $(BIN)/zeroos-aarch64.elf "$(USB_BOOT)/boot/zeroos-aarch64.elf"
+	@cp $(BIN)/zeroos-arm.elf     "$(USB_BOOT)/boot/zeroos-arm.elf"
+	@echo "[usb] Marking ISO store partition..."
+	@touch "$(USB_ISO)/.zeroos_iso_store"
+	@echo "[usb] Generating grub.cfg..."
+	@scripts/gen_grub_cfg.sh "$(USB_ISO)" "$(USB_BOOT)/boot/grub/grub.cfg"
+	@echo "[usb] USB deployment complete."
+	@echo "  Boot partition: $(USB_BOOT)"
+	@echo "  ISO partition:  $(USB_ISO)"
+	@echo "  Kernels deployed:"
+	@echo "    /boot/zeroos-x86_64.elf"
+	@echo "    /boot/zeroos-x86.elf"
+	@echo "    /boot/zeroos-aarch64.elf"
+	@echo "    /boot/zeroos-arm.elf"
+
 # ── Raw binary image (arm / aarch64) ────────────────────────────────
 
 image: kernel
@@ -184,20 +254,20 @@ image: kernel
 
 QEMU_COMMON := -serial stdio -no-reboot -no-shutdown
 
+# QEMU RAM in MiB (override on the command line: make run-x86 QEMU_RAM=4096)
+QEMU_RAM ?= 2048
+
 run-x86:
 	@$(MAKE) --no-print-directory ARCH=x86 kernel
-	qemu-system-i386 -kernel $(BIN)/zeroos-x86.elf $(QEMU_COMMON)
+	qemu-system-i386 -kernel $(BIN)/zeroos-x86.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
 run-x86_64:
 	@$(MAKE) --no-print-directory ARCH=x86_64 kernel
-	qemu-system-x86_64 -kernel $(BIN)/zeroos-x86_64.elf $(QEMU_COMMON)
+	qemu-system-x86_64 -kernel $(BIN)/zeroos-x86_64.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
 run-arm:
 	@$(MAKE) --no-print-directory ARCH=arm kernel
-	qemu-system-arm -M virt -kernel $(BIN)/zeroos-arm.elf $(QEMU_COMMON)
-
-# QEMU RAM in MiB (override on the command line: make run-aarch64 QEMU_RAM=4096)
-QEMU_RAM ?= 2048
+	qemu-system-arm -M virt -kernel $(BIN)/zeroos-arm.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
 run-aarch64:
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel

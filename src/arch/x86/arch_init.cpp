@@ -2,6 +2,7 @@
 #include "boot_info.h"
 #include "multiboot2.h"
 #include "console.h"
+#include "fb_console.h"
 #include "string.h"
 
 // ── x86 I/O port helpers ─────────────────────────────────────────────
@@ -57,8 +58,11 @@ char arch_serial_getchar() {
     return static_cast<char>(x86_inb(COM1_DATA));
 }
 
+void x86_idt_init();
+
 void arch_early_init() {
     serial_init();
+    x86_idt_init();
 }
 
 [[noreturn]] void arch_halt() {
@@ -67,6 +71,15 @@ void arch_early_init() {
 }
 
 // ── Multiboot2 parsing ──────────────────────────────────────────────
+
+static void copy_module_name(char *dst, const char *src, uint32_t max_len) {
+    uint32_t i = 0;
+    while (i < max_len - 1 && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
 
 static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
     auto *mb = reinterpret_cast<Multiboot2FixedPart *>(
@@ -94,6 +107,21 @@ static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
                 entry = reinterpret_cast<Multiboot2MmapEntry *>(
                     reinterpret_cast<uintptr_t>(entry) + mmap->entry_size);
             }
+        } else if (tag->type == MB2_TAG_FRAMEBUFFER) {
+            auto *fb = reinterpret_cast<Multiboot2FramebufferTag *>(tag);
+            info.framebuffer.addr      = fb->addr;
+            info.framebuffer.pitch     = fb->pitch;
+            info.framebuffer.width     = fb->width;
+            info.framebuffer.height    = fb->height;
+            info.framebuffer.bpp       = fb->bpp;
+            info.framebuffer.available = true;
+        } else if (tag->type == MB2_TAG_MODULE &&
+                   info.module_count < MAX_BOOT_MODULES) {
+            auto *mod = reinterpret_cast<Multiboot2ModuleTag *>(tag);
+            auto &m = info.modules[info.module_count++];
+            m.hpa  = mod->mod_start;
+            m.size = mod->mod_end - mod->mod_start;
+            copy_module_name(m.name, mod->cmdline(), BOOT_MODULE_NAME_LEN);
         }
 
         uintptr_t next = reinterpret_cast<uintptr_t>(tag) + tag->size;
@@ -127,6 +155,22 @@ static void parse_multiboot1(uint32_t mb_info_addr, BootInfo &info) {
     }
 }
 
+// ── Derive ram_base / total_ram from parsed memory regions ──────────
+
+static void derive_ram_totals(BootInfo &info) {
+    uint64_t lowest_base = UINT64_MAX;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < info.memory_region_count; i++) {
+        if (info.memory_regions[i].type != MEMORY_AVAILABLE)
+            continue;
+        total += info.memory_regions[i].length;
+        if (info.memory_regions[i].base < lowest_base)
+            lowest_base = info.memory_regions[i].base;
+    }
+    info.ram_base  = (lowest_base == UINT64_MAX) ? 0 : lowest_base;
+    info.total_ram = total;
+}
+
 // ── Entry point (called from boot_x86.S) ────────────────────────────
 
 extern "C" [[noreturn]]
@@ -144,6 +188,11 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     } else {
         kprintf("WARNING: unknown multiboot magic 0x%x\n", mb_magic);
     }
+
+    derive_ram_totals(info);
+
+    if (info.framebuffer.available)
+        fb_init(info.framebuffer);
 
     kernel_start(info);
 }

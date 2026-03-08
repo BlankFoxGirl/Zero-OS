@@ -2,7 +2,96 @@
 #include "boot_info.h"
 #include "multiboot2.h"
 #include "console.h"
+#include "fb_console.h"
 #include "string.h"
+
+// ── Dynamic page-table mapping ───────────────────────────────────────
+//
+// The boot code identity-maps 0–4 GiB.  GPU framebuffers on UEFI
+// systems can live above 4 GiB, so we dynamically add 2 MiB-page
+// mappings for any physical region the kernel needs at runtime.
+
+extern "C" uint64_t pdpt[];
+
+alignas(4096) static uint64_t spare_pds[4][512];
+static uint32_t spare_pd_used = 0;
+
+static bool ensure_physical_mapped(uint64_t phys_start, uint64_t size) {
+    uint64_t phys_end = phys_start + size;
+    if (phys_end <= 0x100000000ULL)
+        return true;
+
+    uint64_t region = phys_start & ~0x3FFFFFFFULL;
+    while (region < phys_end) {
+        uint32_t idx = static_cast<uint32_t>(region >> 30);
+        if (idx >= 512)
+            return false;
+
+        if (!(pdpt[idx] & 1)) {
+            if (spare_pd_used >= 4)
+                return false;
+
+            uint64_t *new_pd = spare_pds[spare_pd_used++];
+            uint64_t base = static_cast<uint64_t>(idx) << 30;
+            for (uint32_t i = 0; i < 512; i++)
+                new_pd[i] = (base + i * 0x200000ULL) | 0x83;
+
+            pdpt[idx] = reinterpret_cast<uint64_t>(new_pd) | 0x03;
+            asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3"
+                         ::: "rax", "memory");
+        }
+        region += 0x40000000ULL;
+    }
+    return true;
+}
+
+// ── Write-Combining for framebuffer ──────────────────────────────────
+//
+// UEFI framebuffers default to Uncacheable (UC), making every pixel
+// write stall on the PCI bus.  We reprogram PAT entry 1 to WC
+// (Write-Combining) and flip the PWT bit in the relevant 2 MiB page
+// table entries so framebuffer writes are buffered and flushed in
+// bursts — typically a 10–100× speedup.
+
+static inline uint64_t x86_rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+static inline void x86_wrmsr(uint32_t msr, uint64_t val) {
+    asm volatile("wrmsr" : : "c"(msr),
+                 "a"(static_cast<uint32_t>(val)),
+                 "d"(static_cast<uint32_t>(val >> 32)));
+}
+
+constexpr uint32_t MSR_PAT = 0x277;
+
+static void setup_pat_wc() {
+    uint64_t pat = x86_rdmsr(MSR_PAT);
+    pat &= ~(0x07ULL << 8);
+    pat |= (0x01ULL << 8);   // PAT1 = WC (Write-Combining)
+    x86_wrmsr(MSR_PAT, pat);
+}
+
+static void set_wc_for_range(uint64_t phys_start, uint64_t size) {
+    uint64_t phys_end = phys_start + size;
+    uint64_t page = phys_start & ~0x1FFFFFULL;
+
+    while (page < phys_end) {
+        uint32_t pdpt_idx = static_cast<uint32_t>(page >> 30);
+        uint32_t pd_idx   = static_cast<uint32_t>((page >> 21) & 0x1FF);
+
+        if (pdpt_idx < 512 && (pdpt[pdpt_idx] & 1)) {
+            uint64_t pd_phys = pdpt[pdpt_idx] & ~0xFFFULL;
+            auto *pd_entries = reinterpret_cast<uint64_t *>(pd_phys);
+            pd_entries[pd_idx] |= (1ULL << 3); // PWT → selects PAT1 = WC
+        }
+        page += 0x200000ULL;
+    }
+
+    asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+}
 
 // ── x86 I/O port helpers ─────────────────────────────────────────────
 
@@ -57,8 +146,12 @@ char arch_serial_getchar() {
     return static_cast<char>(x86_inb(COM1_DATA));
 }
 
+void x86_64_idt_init();
+
 void arch_early_init() {
     serial_init();
+    setup_pat_wc();
+    x86_64_idt_init();
 }
 
 [[noreturn]] void arch_halt() {
@@ -67,6 +160,15 @@ void arch_early_init() {
 }
 
 // ── Multiboot2 parsing ──────────────────────────────────────────────
+
+static void copy_module_name(char *dst, const char *src, uint32_t max_len) {
+    uint32_t i = 0;
+    while (i < max_len - 1 && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
 
 static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
     auto *mb = reinterpret_cast<Multiboot2FixedPart *>(
@@ -94,6 +196,21 @@ static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
                 entry = reinterpret_cast<Multiboot2MmapEntry *>(
                     reinterpret_cast<uintptr_t>(entry) + mmap->entry_size);
             }
+        } else if (tag->type == MB2_TAG_FRAMEBUFFER) {
+            auto *fb = reinterpret_cast<Multiboot2FramebufferTag *>(tag);
+            info.framebuffer.addr      = fb->addr;
+            info.framebuffer.pitch     = fb->pitch;
+            info.framebuffer.width     = fb->width;
+            info.framebuffer.height    = fb->height;
+            info.framebuffer.bpp       = fb->bpp;
+            info.framebuffer.available = true;
+        } else if (tag->type == MB2_TAG_MODULE &&
+                   info.module_count < MAX_BOOT_MODULES) {
+            auto *mod = reinterpret_cast<Multiboot2ModuleTag *>(tag);
+            auto &m = info.modules[info.module_count++];
+            m.hpa  = mod->mod_start;
+            m.size = mod->mod_end - mod->mod_start;
+            copy_module_name(m.name, mod->cmdline(), BOOT_MODULE_NAME_LEN);
         }
 
         uintptr_t next = reinterpret_cast<uintptr_t>(tag) + tag->size;
@@ -127,6 +244,22 @@ static void parse_multiboot1(uint32_t mb_info_addr, BootInfo &info) {
     }
 }
 
+// ── Derive ram_base / total_ram from parsed memory regions ──────────
+
+static void derive_ram_totals(BootInfo &info) {
+    uint64_t lowest_base = UINT64_MAX;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < info.memory_region_count; i++) {
+        if (info.memory_regions[i].type != MEMORY_AVAILABLE)
+            continue;
+        total += info.memory_regions[i].length;
+        if (info.memory_regions[i].base < lowest_base)
+            lowest_base = info.memory_regions[i].base;
+    }
+    info.ram_base  = (lowest_base == UINT64_MAX) ? 0 : lowest_base;
+    info.total_ram = total;
+}
+
 // ── Entry point (called from boot.S) ─────────────────────────────────
 
 extern "C" [[noreturn]]
@@ -143,6 +276,17 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
         parse_multiboot1(mb_info_addr, info);
     } else {
         kprintf("WARNING: unknown multiboot magic 0x%x\n", mb_magic);
+    }
+
+    derive_ram_totals(info);
+
+    if (info.framebuffer.available) {
+        uint64_t fb_size = static_cast<uint64_t>(info.framebuffer.pitch)
+                         * info.framebuffer.height;
+        if (ensure_physical_mapped(info.framebuffer.addr, fb_size)) {
+            set_wc_for_range(info.framebuffer.addr, fb_size);
+            fb_init(info.framebuffer);
+        }
     }
 
     kernel_start(info);

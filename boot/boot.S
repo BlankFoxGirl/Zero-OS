@@ -43,13 +43,14 @@ mb2_hdr_start:
     .long (mb2_hdr_end - mb2_hdr_start)
     .long -(MB2_MAGIC + MB2_ARCH_X86 + (mb2_hdr_end - mb2_hdr_start))
 
-    /* Request a linear framebuffer */
+    /* Request a linear framebuffer (optional so UEFI boot can proceed
+       even when the exact mode is unavailable) */
     .align 8
     .short 5                        /* type  — framebuffer */
-    .short 0                        /* flags — required    */
+    .short 1                        /* flags — optional    */
     .long  20                       /* tag size            */
-    .long  1024                     /* preferred width     */
-    .long  768                      /* preferred height    */
+    .long  0                        /* preferred width  (0 = any) */
+    .long  0                        /* preferred height (0 = any) */
     .long  32                       /* preferred bpp       */
 
     /* Terminating tag */
@@ -96,23 +97,37 @@ _start:
     xor %eax, %eax
     rep stosl
 
-    /* ---- Build identity-mapped page tables (first 1 GiB) ----
+    /* ---- Build identity-mapped page tables (first 4 GiB) ----
      *
-     *   PML4[0] -> PDPT
-     *   PDPT[0] -> PD
-     *   PD[0..511] -> 512 × 2 MiB huge pages
+     *   PML4[0]      -> PDPT
+     *   PDPT[0..3]   -> PD0..PD3
+     *   PD0..3[0..511] -> 2048 × 2 MiB huge pages
+     *
+     * 4 GiB covers kernel memory and PCI MMIO regions (GPU
+     * framebuffers, etc.) typically mapped in the 2–4 GiB range
+     * by UEFI firmware.  Uses only 2 MiB pages (universally
+     * supported on all x86_64 CPUs).
      */
     mov $pdpt, %eax
     or  $(PAGE_PRESENT | PAGE_WRITABLE), %eax
     mov %eax, (pml4)
 
+    /* PDPT[0..3] -> four page directories */
     mov $pd, %eax
     or  $(PAGE_PRESENT | PAGE_WRITABLE), %eax
-    mov %eax, (pdpt)
+    mov $pdpt, %edi
+    mov $4, %ecx
+2:
+    mov %eax, (%edi)
+    add $4096, %eax
+    add $8, %edi
+    dec %ecx
+    jnz 2b
 
+    /* Fill all four PDs with 2 MiB huge pages (0 – 4 GiB) */
     mov $pd, %edi
     mov $(PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE), %eax
-    mov $512, %ecx
+    mov $2048, %ecx
 1:
     mov %eax, (%edi)
     add $0x200000, %eax
@@ -203,8 +218,9 @@ gdt64_ptr:
 .section .bss
 .align 4096
 pml4:   .skip 4096
+.global pdpt
 pdpt:   .skip 4096
-pd:     .skip 4096
+pd:     .skip 16384                     /* 4 page directories (4 GiB) */
 
 .align 16
 stack_bottom:
