@@ -3,6 +3,7 @@
 
 static constexpr uint32_t FONT_W = 8;
 static constexpr uint32_t FONT_H = 16;
+static constexpr uint32_t FB_BACKBUF_MAX = 8u * 1024 * 1024;
 
 // IBM VGA 8x16 bitmap font — printable ASCII 32-126.
 // Each character is 16 bytes (one byte per row, MSB = leftmost pixel).
@@ -202,36 +203,30 @@ static const uint8_t font_bitmap[][FONT_H] = {
 static constexpr int FONT_FIRST = 32;
 static constexpr int FONT_LAST  = 126;
 
+alignas(4096) static uint8_t backbuf[FB_BACKBUF_MAX];
+
 static struct {
-    uint8_t *fb;
+    uint8_t *fb;        // real framebuffer (VRAM, WC/UC mapped)
+    uint8_t *buf;       // rendering target (backbuf when double-buffered)
     uint32_t pitch;
     uint32_t width;
     uint32_t height;
     uint8_t  bpp;
     uint32_t cx, cy;
     uint32_t cols, rows;
+    uint32_t dirty_y0;  // top-most dirty pixel row
+    uint32_t dirty_y1;  // one past bottom-most dirty pixel row
+    bool     buffered;  // true when using the shadow back buffer
     bool     ready;
 } con;
 
 static constexpr uint32_t FG = 0x00CCCCCC;  // light grey
 static constexpr uint32_t BG = 0x00000000;  // black
 
-static void plot(uint32_t x, uint32_t y, uint32_t color) {
-    uint32_t bytes_pp = con.bpp / 8;
-    uint8_t *px = con.fb + y * con.pitch + x * bytes_pp;
-    if (con.bpp == 32) {
-        *reinterpret_cast<uint32_t *>(px) = color;
-    } else if (con.bpp == 24) {
-        px[0] = color & 0xFF;
-        px[1] = (color >> 8) & 0xFF;
-        px[2] = (color >> 16) & 0xFF;
-    } else if (con.bpp == 16) {
-        uint16_t c16 = static_cast<uint16_t>(
-            ((color >> 8) & 0xF800) |
-            ((color >> 5) & 0x07E0) |
-            ((color >> 3) & 0x001F));
-        *reinterpret_cast<uint16_t *>(px) = c16;
-    }
+static void mark_dirty(uint32_t y0, uint32_t y1) {
+    if (!con.buffered) return;
+    if (y0 < con.dirty_y0) con.dirty_y0 = y0;
+    if (y1 > con.dirty_y1) con.dirty_y1 = y1;
 }
 
 static void draw_char(uint32_t col, uint32_t row, char c) {
@@ -243,20 +238,47 @@ static void draw_char(uint32_t col, uint32_t row, char c) {
 
     uint32_t x0 = col * FONT_W;
     uint32_t y0 = row * FONT_H;
+    uint32_t bytes_pp = con.bpp / 8;
 
     for (uint32_t dy = 0; dy < FONT_H; dy++) {
         uint8_t bits = glyph[dy];
-        for (uint32_t dx = 0; dx < FONT_W; dx++) {
-            plot(x0 + dx, y0 + dy, (bits & 0x80) ? FG : BG);
-            bits <<= 1;
+        uint8_t *row_ptr = con.buf + (y0 + dy) * con.pitch + x0 * bytes_pp;
+
+        if (con.bpp == 32) {
+            auto *px = reinterpret_cast<uint32_t *>(row_ptr);
+            for (uint32_t dx = 0; dx < FONT_W; dx++) {
+                px[dx] = (bits & 0x80) ? FG : BG;
+                bits <<= 1;
+            }
+        } else if (con.bpp == 24) {
+            for (uint32_t dx = 0; dx < FONT_W; dx++) {
+                uint32_t color = (bits & 0x80) ? FG : BG;
+                row_ptr[dx * 3]     = color & 0xFF;
+                row_ptr[dx * 3 + 1] = (color >> 8) & 0xFF;
+                row_ptr[dx * 3 + 2] = (color >> 16) & 0xFF;
+                bits <<= 1;
+            }
+        } else {
+            for (uint32_t dx = 0; dx < FONT_W; dx++) {
+                uint32_t color = (bits & 0x80) ? FG : BG;
+                uint16_t c16 = static_cast<uint16_t>(
+                    ((color >> 8) & 0xF800) |
+                    ((color >> 5) & 0x07E0) |
+                    ((color >> 3) & 0x001F));
+                *reinterpret_cast<uint16_t *>(row_ptr + dx * 2) = c16;
+                bits <<= 1;
+            }
         }
     }
+
+    mark_dirty(y0, y0 + FONT_H);
 }
 
 static void scroll_up() {
     uint32_t row_bytes = con.pitch * FONT_H;
-    memmove(con.fb, con.fb + row_bytes, row_bytes * (con.rows - 1));
-    memset(con.fb + row_bytes * (con.rows - 1), 0, row_bytes);
+    memmove(con.buf, con.buf + row_bytes, row_bytes * (con.rows - 1));
+    memset(con.buf + row_bytes * (con.rows - 1), 0, row_bytes);
+    mark_dirty(0, con.height);
 }
 
 static void newline() {
@@ -278,9 +300,23 @@ void fb_init(const FramebufferInfo &fb) {
     con.cy     = 0;
     con.cols   = fb.width / FONT_W;
     con.rows   = fb.height / FONT_H;
-    con.ready  = true;
 
-    memset(con.fb, 0, static_cast<size_t>(con.pitch) * con.height);
+    uint32_t fb_size = con.pitch * con.height;
+    if (fb_size <= FB_BACKBUF_MAX) {
+        con.buf      = backbuf;
+        con.buffered = true;
+    } else {
+        con.buf      = con.fb;
+        con.buffered = false;
+    }
+
+    con.dirty_y0 = con.height;
+    con.dirty_y1 = 0;
+    con.ready    = true;
+
+    if (con.buffered)
+        memset(con.buf, 0, fb_size);
+    memset(con.fb, 0, fb_size);
 }
 
 void fb_putchar(char c) {
@@ -307,6 +343,24 @@ void fb_putchar(char c) {
     con.cx++;
     if (con.cx >= con.cols)
         newline();
+}
+
+void fb_flush() {
+    if (!con.ready || !con.buffered)
+        return;
+    if (con.dirty_y0 >= con.dirty_y1)
+        return;
+
+    uint32_t y0 = con.dirty_y0;
+    uint32_t y1 = con.dirty_y1;
+    if (y1 > con.height) y1 = con.height;
+
+    memcpy(con.fb  + y0 * con.pitch,
+           con.buf + y0 * con.pitch,
+           (y1 - y0) * con.pitch);
+
+    con.dirty_y0 = con.height;
+    con.dirty_y1 = 0;
 }
 
 bool fb_available() {
