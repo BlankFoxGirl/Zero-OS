@@ -32,6 +32,9 @@ mkdir -p "$(dirname "$OUTPUT")"
 {
     echo 'insmod all_video'
     echo ''
+    echo 'set gfxmode=auto'
+    echo 'set gfxpayload=keep'
+    echo ''
     echo 'set timeout=3'
     echo 'set default=0'
     echo ''

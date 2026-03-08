@@ -24,6 +24,15 @@ struct BootModule {
     char     name[BOOT_MODULE_NAME_LEN];
 };
 
+struct FramebufferInfo {
+    uint64_t addr;
+    uint32_t pitch;
+    uint32_t width;
+    uint32_t height;
+    uint8_t  bpp;
+    bool     available;
+};
+
 struct BootInfo {
     const char  *arch_name;
     MemoryRegion memory_regions[MAX_MEMORY_REGIONS];
@@ -32,6 +41,7 @@ struct BootInfo {
     uint64_t     ram_base;
     BootModule   modules[MAX_BOOT_MODULES];
     uint32_t     module_count;
+    FramebufferInfo framebuffer;
 };
 
 // ── Memory layout policy ─────────────────────────────────────────────

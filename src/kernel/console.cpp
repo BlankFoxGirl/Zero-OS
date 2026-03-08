@@ -1,9 +1,11 @@
 #include "console.h"
 #include "arch_interface.h"
+#include "fb_console.h"
 #include "string.h"
 
 void kputchar(char c) {
     arch_serial_putchar(c);
+    fb_putchar(c);
 }
 
 void kputs(const char *s) {

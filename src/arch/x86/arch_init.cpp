@@ -2,6 +2,7 @@
 #include "boot_info.h"
 #include "multiboot2.h"
 #include "console.h"
+#include "fb_console.h"
 #include "string.h"
 
 // ── x86 I/O port helpers ─────────────────────────────────────────────
@@ -106,6 +107,14 @@ static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
                 entry = reinterpret_cast<Multiboot2MmapEntry *>(
                     reinterpret_cast<uintptr_t>(entry) + mmap->entry_size);
             }
+        } else if (tag->type == MB2_TAG_FRAMEBUFFER) {
+            auto *fb = reinterpret_cast<Multiboot2FramebufferTag *>(tag);
+            info.framebuffer.addr      = fb->addr;
+            info.framebuffer.pitch     = fb->pitch;
+            info.framebuffer.width     = fb->width;
+            info.framebuffer.height    = fb->height;
+            info.framebuffer.bpp       = fb->bpp;
+            info.framebuffer.available = true;
         } else if (tag->type == MB2_TAG_MODULE &&
                    info.module_count < MAX_BOOT_MODULES) {
             auto *mod = reinterpret_cast<Multiboot2ModuleTag *>(tag);
@@ -181,6 +190,9 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     }
 
     derive_ram_totals(info);
+
+    if (info.framebuffer.available)
+        fb_init(info.framebuffer);
 
     kernel_start(info);
 }

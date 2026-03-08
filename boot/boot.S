@@ -97,23 +97,37 @@ _start:
     xor %eax, %eax
     rep stosl
 
-    /* ---- Build identity-mapped page tables (first 1 GiB) ----
+    /* ---- Build identity-mapped page tables (first 4 GiB) ----
      *
-     *   PML4[0] -> PDPT
-     *   PDPT[0] -> PD
-     *   PD[0..511] -> 512 × 2 MiB huge pages
+     *   PML4[0]      -> PDPT
+     *   PDPT[0..3]   -> PD0..PD3
+     *   PD0..3[0..511] -> 2048 × 2 MiB huge pages
+     *
+     * 4 GiB covers kernel memory and PCI MMIO regions (GPU
+     * framebuffers, etc.) typically mapped in the 2–4 GiB range
+     * by UEFI firmware.  Uses only 2 MiB pages (universally
+     * supported on all x86_64 CPUs).
      */
     mov $pdpt, %eax
     or  $(PAGE_PRESENT | PAGE_WRITABLE), %eax
     mov %eax, (pml4)
 
+    /* PDPT[0..3] -> four page directories */
     mov $pd, %eax
     or  $(PAGE_PRESENT | PAGE_WRITABLE), %eax
-    mov %eax, (pdpt)
+    mov $pdpt, %edi
+    mov $4, %ecx
+2:
+    mov %eax, (%edi)
+    add $4096, %eax
+    add $8, %edi
+    dec %ecx
+    jnz 2b
 
+    /* Fill all four PDs with 2 MiB huge pages (0 – 4 GiB) */
     mov $pd, %edi
     mov $(PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE), %eax
-    mov $512, %ecx
+    mov $2048, %ecx
 1:
     mov %eax, (%edi)
     add $0x200000, %eax
@@ -204,8 +218,9 @@ gdt64_ptr:
 .section .bss
 .align 4096
 pml4:   .skip 4096
+.global pdpt
 pdpt:   .skip 4096
-pd:     .skip 4096
+pd:     .skip 16384                     /* 4 page directories (4 GiB) */
 
 .align 16
 stack_bottom:

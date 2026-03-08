@@ -60,6 +60,18 @@ struct Multiboot2ModuleTag {
     }
 };
 
+struct Multiboot2FramebufferTag {
+    uint32_t type;
+    uint32_t size;
+    uint64_t addr;
+    uint32_t pitch;
+    uint32_t width;
+    uint32_t height;
+    uint8_t  bpp;
+    uint8_t  fb_type;
+    uint8_t  reserved;
+} __attribute__((packed));
+
 struct Multiboot2MmapEntry {
     uint64_t base_addr;
     uint64_t length;
