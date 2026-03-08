@@ -48,6 +48,15 @@ void arch_serial_write(const char *str, size_t len) {
         arch_serial_putchar(str[i]);
 }
 
+bool arch_serial_has_data() {
+    return x86_inb(COM1_LINE_STAT) & 0x01;
+}
+
+char arch_serial_getchar() {
+    while (!arch_serial_has_data()) {}
+    return static_cast<char>(x86_inb(COM1_DATA));
+}
+
 void arch_early_init() {
     serial_init();
 }
