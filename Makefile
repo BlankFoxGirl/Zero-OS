@@ -184,20 +184,20 @@ image: kernel
 
 QEMU_COMMON := -serial stdio -no-reboot -no-shutdown
 
+# QEMU RAM in MiB (override on the command line: make run-x86 QEMU_RAM=4096)
+QEMU_RAM ?= 2048
+
 run-x86:
 	@$(MAKE) --no-print-directory ARCH=x86 kernel
-	qemu-system-i386 -kernel $(BIN)/zeroos-x86.elf $(QEMU_COMMON)
+	qemu-system-i386 -kernel $(BIN)/zeroos-x86.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
 run-x86_64:
 	@$(MAKE) --no-print-directory ARCH=x86_64 kernel
-	qemu-system-x86_64 -kernel $(BIN)/zeroos-x86_64.elf $(QEMU_COMMON)
+	qemu-system-x86_64 -kernel $(BIN)/zeroos-x86_64.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
 run-arm:
 	@$(MAKE) --no-print-directory ARCH=arm kernel
-	qemu-system-arm -M virt -kernel $(BIN)/zeroos-arm.elf $(QEMU_COMMON)
-
-# QEMU RAM in MiB (override on the command line: make run-aarch64 QEMU_RAM=4096)
-QEMU_RAM ?= 2048
+	qemu-system-arm -M virt -kernel $(BIN)/zeroos-arm.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
 run-aarch64:
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel

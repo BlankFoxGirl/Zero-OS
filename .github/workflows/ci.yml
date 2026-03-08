@@ -18,15 +18,25 @@ jobs:
           - arch: x86
             cross: i686-linux-gnu-
             packages: gcc-i686-linux-gnu g++-i686-linux-gnu
+            qemu_pkg: qemu-system-x86
+            qemu_cmd: qemu-system-i386 -kernel bin/zeroos-x86.elf -m 256
           - arch: x86_64
             cross: ""
             packages: ""
+            qemu_pkg: qemu-system-x86
+            qemu_cmd: qemu-system-x86_64 -kernel bin/zeroos-x86_64.elf -m 256
           - arch: arm
             cross: arm-none-eabi-
             packages: gcc-arm-none-eabi
+            qemu_pkg: qemu-system-arm
+            qemu_cmd: qemu-system-arm -M virt -kernel bin/zeroos-arm.elf -m 256
           - arch: aarch64
             cross: aarch64-linux-gnu-
             packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            qemu_pkg: qemu-system-arm
+            qemu_cmd: >-
+              qemu-system-aarch64 -M virt,virtualization=on,gic-version=2
+              -cpu cortex-a57 -m 256 -kernel bin/zeroos-aarch64.elf
 
     steps:
     - uses: actions/checkout@v4
@@ -39,3 +49,18 @@ jobs:
 
     - name: Build kernel
       run: make ARCH=${{ matrix.arch }} CROSS=${{ matrix.cross }} kernel
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ matrix.qemu_pkg }}
+
+    - name: Boot smoke test
+      run: |
+        timeout 10 ${{ matrix.qemu_cmd }} \
+          -serial file:boot_output.log -display none \
+          -no-reboot -no-shutdown || true
+        echo "--- Serial output ---"
+        cat boot_output.log
+        echo "--- End ---"
+        grep -q "ZeroOS v0.1.0" boot_output.log

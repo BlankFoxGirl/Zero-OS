@@ -57,8 +57,11 @@ char arch_serial_getchar() {
     return static_cast<char>(x86_inb(COM1_DATA));
 }
 
+void x86_idt_init();
+
 void arch_early_init() {
     serial_init();
+    x86_idt_init();
 }
 
 [[noreturn]] void arch_halt() {
@@ -127,6 +130,22 @@ static void parse_multiboot1(uint32_t mb_info_addr, BootInfo &info) {
     }
 }
 
+// ── Derive ram_base / total_ram from parsed memory regions ──────────
+
+static void derive_ram_totals(BootInfo &info) {
+    uint64_t lowest_base = UINT64_MAX;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < info.memory_region_count; i++) {
+        if (info.memory_regions[i].type != MEMORY_AVAILABLE)
+            continue;
+        total += info.memory_regions[i].length;
+        if (info.memory_regions[i].base < lowest_base)
+            lowest_base = info.memory_regions[i].base;
+    }
+    info.ram_base  = (lowest_base == UINT64_MAX) ? 0 : lowest_base;
+    info.total_ram = total;
+}
+
 // ── Entry point (called from boot_x86.S) ────────────────────────────
 
 extern "C" [[noreturn]]
@@ -144,6 +163,8 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     } else {
         kprintf("WARNING: unknown multiboot magic 0x%x\n", mb_magic);
     }
+
+    derive_ram_totals(info);
 
     kernel_start(info);
 }
