@@ -106,7 +106,7 @@ DEPS := $(OBJS:.o=.d)
 
 # ── Phony targets ───────────────────────────────────────────────────
 
-.PHONY: kernel iso image clean all \
+.PHONY: kernel iso image iso-store clean all \
         run-x86 run-x86_64 run-arm run-aarch64 run-aarch64-vm
 
 # ── Default target ───────────────────────────────────────────────────
@@ -206,11 +206,18 @@ run-aarch64:
 		-kernel $(BIN)/zeroos-aarch64.elf $(QEMU_COMMON)
 
 # Boot an aarch64 guest inside the ZeroOS VM.
-# Usage:
+#
+# Single ISO (legacy):
 #   make run-aarch64-vm GUEST_KERNEL=path/to/alpine.iso
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image              (raw kernel)
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
-#   make run-aarch64-vm GUEST_KERNEL=path/to/alpine.iso QEMU_RAM=4096
+#
+# Multiple ISOs (FAT32 ISO store):
+#   make run-aarch64-vm GUEST_ISO_DIR=path/to/isos/
+#
+# Options:
+#   QEMU_RAM=4096    Override guest RAM (default 2048 MiB)
+#   QEMU_NET=        Disable guest networking
 #
 # The guest staging address is computed from QEMU_RAM to match the kernel's
 # dynamic memory layout: RAM_BASE(0x40000000) + 128 MiB ZeroOS + 25% guest RAM.
@@ -222,11 +229,37 @@ GUEST_INITRD_HPA  = $(shell printf '0x%x' $$(( 0x40000000 + 128 * 1048576 + $(QE
 # Override QEMU_NET= (empty) on the command line to disable.
 QEMU_NET ?= -netdev user,id=net0 -device virtio-net-device,netdev=net0
 
+GUEST_ISO_DIR ?= ./ISOs
+
+# ISO store image path (always under the aarch64 build dir since
+# run-aarch64-vm is the only consumer)
+ISO_STORE_IMG = build/aarch64/iso_store.img
+
+# Build a FAT32 image containing all ISOs from GUEST_ISO_DIR.
+# Requires: mtools (mcopy), dosfstools (mkfs.fat)
+iso-store:
+ifndef GUEST_ISO_DIR
+	$(error GUEST_ISO_DIR is required. Usage: make iso-store GUEST_ISO_DIR=path/to/isos/)
+endif
+	@mkdir -p $(dir $(ISO_STORE_IMG))
+	scripts/create_iso_store.sh "$(GUEST_ISO_DIR)" "$(ISO_STORE_IMG)"
+
 run-aarch64-vm:
 ifndef GUEST_KERNEL
-	$(error GUEST_KERNEL is required. Usage: make run-aarch64-vm GUEST_KERNEL=path/to/Image.iso)
+ifndef GUEST_ISO_DIR
+	$(error Either GUEST_KERNEL or GUEST_ISO_DIR is required.)
+endif
 endif
 	@$(MAKE) --no-print-directory ARCH=aarch64 kernel
+ifdef GUEST_ISO_DIR
+	@$(MAKE) --no-print-directory ARCH=aarch64 iso-store GUEST_ISO_DIR="$(GUEST_ISO_DIR)"
+	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
+		-cpu cortex-a57 -m $(QEMU_RAM) \
+		-kernel $(BIN)/zeroos-aarch64.elf \
+		-device loader,file=$(ISO_STORE_IMG),addr=$(GUEST_STAGING_HPA),force-raw=on \
+		$(QEMU_NET) \
+		$(QEMU_COMMON)
+else
 	qemu-system-aarch64 -M virt,virtualization=on,gic-version=2 \
 		-cpu cortex-a57 -m $(QEMU_RAM) \
 		-kernel $(BIN)/zeroos-aarch64.elf \
@@ -234,6 +267,7 @@ endif
 		$(if $(GUEST_INITRD),-device loader$(comma)file=$(GUEST_INITRD)$(comma)addr=$(GUEST_INITRD_HPA)$(comma)force-raw=on) \
 		$(QEMU_NET) \
 		$(QEMU_COMMON)
+endif
 
 # ── Directory creation ───────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 #include "vm.h"
 #include "virtio_blk.h"
+#include "iso_store.h"
 #include "string.h"
 #include "console.h"
 #include "memory.h"
@@ -381,6 +382,13 @@ void vm_run_test_guest(const MemoryLayout *layout) {
         return;
     }
     VM *vm = r.value();
+
+    IsoStoreResult iso = iso_store_detect_and_select(
+        vm->ramdisk_hpa, vm->ramdisk_size);
+    if (iso.found) {
+        vm->ramdisk_hpa  = iso.selected_hpa;
+        vm->ramdisk_size = iso.selected_size;
+    }
 
     if (vm_has_linux_image(vm->ramdisk_hpa)) {
         kprintf("vm: guest image detected in staging area, loading...\n");

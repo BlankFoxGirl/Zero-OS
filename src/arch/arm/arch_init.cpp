@@ -8,6 +8,7 @@ constexpr uintptr_t UART_BASE  = 0x09000000;
 constexpr uintptr_t UART_DR    = UART_BASE + 0x000;
 constexpr uintptr_t UART_FR    = UART_BASE + 0x018;
 constexpr uint32_t  UART_FR_TXFF = (1 << 5);
+constexpr uint32_t  UART_FR_RXFE = (1 << 4);
 
 static inline void mmio_write32(uintptr_t addr, uint32_t val) {
     *reinterpret_cast<volatile uint32_t *>(addr) = val;
@@ -27,6 +28,15 @@ void arch_serial_putchar(char c) {
 void arch_serial_write(const char *str, size_t len) {
     for (size_t i = 0; i < len; i++)
         arch_serial_putchar(str[i]);
+}
+
+bool arch_serial_has_data() {
+    return !(mmio_read32(UART_FR) & UART_FR_RXFE);
+}
+
+char arch_serial_getchar() {
+    while (!arch_serial_has_data()) {}
+    return static_cast<char>(mmio_read32(UART_DR) & 0xFF);
 }
 
 void arch_early_init() {
