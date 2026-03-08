@@ -86,9 +86,58 @@ _vectors_el2:
 .section .text
 .global _hyp_exception_stub
 _hyp_exception_stub:
+    /* Check if this is a data abort during a memory probe. */
+    adrp x4, g_probe_active
+    ldrb w5, [x4, :lo12:g_probe_active]
+    cbz  w5, .not_probe
+
+    mrs  x1, esr_el2
+    lsr  x6, x1, #26
+    cmp  w6, #0x25           /* EC = Data Abort from current EL */
+    b.ne .not_probe
+
+    /* Fault during probe — flag it and skip the faulting instruction. */
+    adrp x4, g_probe_faulted
+    mov  w5, #1
+    strb w5, [x4, :lo12:g_probe_faulted]
+
+    mrs  x6, elr_el2
+    add  x6, x6, #4
+    msr  elr_el2, x6
+    eret
+
+.not_probe:
     mrs x1, esr_el2
     mrs x2, elr_el2
     mrs x3, far_el2
     bl  hyp_exception_handler
 1:  wfi
     b   1b
+
+/* ================================================================
+   probe_readable — test if a physical address is backed by RAM.
+   x0 = address to probe
+   Returns w0 = 1 (readable) or 0 (faulted).
+   Uses a single LDR so the fault handler can skip exactly one insn.
+   ================================================================ */
+.global probe_readable
+probe_readable:
+    /* Clear fault flag, enable probing */
+    adrp x1, g_probe_faulted
+    strb wzr, [x1, :lo12:g_probe_faulted]
+    adrp x1, g_probe_active
+    mov  w2, #1
+    strb w2, [x1, :lo12:g_probe_active]
+    isb
+
+    ldr  w3, [x0]               /* <-- the single probe instruction */
+
+    /* Disable probing */
+    adrp x1, g_probe_active
+    strb wzr, [x1, :lo12:g_probe_active]
+
+    /* Return !faulted */
+    adrp x1, g_probe_faulted
+    ldrb w0, [x1, :lo12:g_probe_faulted]
+    eor  w0, w0, #1
+    ret

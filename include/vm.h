@@ -2,6 +2,7 @@
 
 #include "types.h"
 #include "result.h"
+#include "boot_info.h"
 #include "vcpu_offsets.h"
 
 // ── vCPU register context ────────────────────────────────────────────
@@ -87,7 +88,7 @@ extern "C" uint64_t vcpu_enter_guest(VCpuContext *ctx);
 // ── VM API ───────────────────────────────────────────────────────────
 
 void        vm_init();
-Result<VM*> vm_create(uint64_t ram_size_bytes);
+Result<VM*> vm_create(const MemoryLayout *layout);
 void        vm_destroy(VM *vm);
 bool        vm_load_image(VM *vm, const void *image,
                           uint64_t size, uint64_t ipa_offset);
