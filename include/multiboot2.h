@@ -45,8 +45,20 @@ struct Multiboot2Tag {
 constexpr uint32_t MB2_TAG_END         = 0;
 constexpr uint32_t MB2_TAG_CMDLINE     = 1;
 constexpr uint32_t MB2_TAG_BOOTLOADER  = 2;
+constexpr uint32_t MB2_TAG_MODULE      = 3;
 constexpr uint32_t MB2_TAG_MMAP        = 6;
 constexpr uint32_t MB2_TAG_FRAMEBUFFER = 8;
+
+struct Multiboot2ModuleTag {
+    uint32_t type;
+    uint32_t size;
+    uint32_t mod_start;
+    uint32_t mod_end;
+    // Followed by null-terminated cmdline string
+    const char *cmdline() const {
+        return reinterpret_cast<const char *>(this) + 16;
+    }
+};
 
 struct Multiboot2MmapEntry {
     uint64_t base_addr;

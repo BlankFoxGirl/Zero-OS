@@ -28,13 +28,14 @@ mb2_hdr_start:
     .long (mb2_hdr_end - mb2_hdr_start)
     .long -(MB2_MAGIC + MB2_ARCH_X86 + (mb2_hdr_end - mb2_hdr_start))
 
-    /* Request a linear framebuffer */
+    /* Request a linear framebuffer (optional so UEFI boot can proceed
+       even when the exact mode is unavailable) */
     .align 8
     .short 5                        /* type  — framebuffer */
-    .short 0                        /* flags — required    */
+    .short 1                        /* flags — optional    */
     .long  20                       /* tag size            */
-    .long  1024                     /* preferred width     */
-    .long  768                      /* preferred height    */
+    .long  0                        /* preferred width  (0 = any) */
+    .long  0                        /* preferred height (0 = any) */
     .long  32                       /* preferred bpp       */
 
     /* Terminating tag */

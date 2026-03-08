@@ -1,6 +1,7 @@
 #include "vm.h"
 #include "virtio_blk.h"
 #include "iso_store.h"
+#include "boot_info.h"
 #include "string.h"
 #include "console.h"
 #include "memory.h"
@@ -371,7 +372,7 @@ static const char *exit_reason_str(VmExitReason r) {
 }
 
 extern "C"
-void vm_run_test_guest(const MemoryLayout *layout) {
+void vm_run_test_guest(const MemoryLayout *layout, const BootInfo *info) {
     kprintf("\n--- VM Initialisation ---\n");
 
     vm_init();
@@ -383,11 +384,47 @@ void vm_run_test_guest(const MemoryLayout *layout) {
     }
     VM *vm = r.value();
 
-    IsoStoreResult iso = iso_store_detect_and_select(
-        vm->ramdisk_hpa, vm->ramdisk_size);
-    if (iso.found) {
-        vm->ramdisk_hpa  = iso.selected_hpa;
-        vm->ramdisk_size = iso.selected_size;
+    // Boot modules (loaded by GRUB or equivalent) take priority over
+    // the staging-area scan.  If a single module is present, use it
+    // directly as the ramdisk source.  If multiple are present and one
+    // is a FAT32 ISO store, run iso_store_detect_and_select on it;
+    // otherwise treat the first module as a raw ISO.
+    bool module_applied = false;
+    if (info && info->module_count > 0) {
+        if (info->module_count == 1) {
+            const auto &m = info->modules[0];
+            kprintf("vm: using boot module '%s' (%llu MiB)\n",
+                    m.name,
+                    (unsigned long long)(m.size / (1024 * 1024)));
+            vm->ramdisk_hpa  = m.hpa;
+            vm->ramdisk_size = m.size;
+            module_applied = true;
+        } else {
+            // Multiple modules — check if first is a FAT32 store
+            const auto &m0 = info->modules[0];
+            IsoStoreResult iso = iso_store_detect_and_select(m0.hpa, m0.size);
+            if (iso.found) {
+                vm->ramdisk_hpa  = iso.selected_hpa;
+                vm->ramdisk_size = iso.selected_size;
+                module_applied = true;
+            } else {
+                kprintf("vm: using first boot module '%s' (%llu MiB)\n",
+                        m0.name,
+                        (unsigned long long)(m0.size / (1024 * 1024)));
+                vm->ramdisk_hpa  = m0.hpa;
+                vm->ramdisk_size = m0.size;
+                module_applied = true;
+            }
+        }
+    }
+
+    if (!module_applied) {
+        IsoStoreResult iso = iso_store_detect_and_select(
+            vm->ramdisk_hpa, vm->ramdisk_size);
+        if (iso.found) {
+            vm->ramdisk_hpa  = iso.selected_hpa;
+            vm->ramdisk_size = iso.selected_size;
+        }
     }
 
     if (vm_has_linux_image(vm->ramdisk_hpa)) {
@@ -437,6 +474,38 @@ void vm_run_test_guest(const MemoryLayout *layout) {
 #else /* !__aarch64__ */
 
 void vm_init() {}
-extern "C" void vm_run_test_guest(const MemoryLayout *) {}
+
+extern "C"
+void vm_run_test_guest(const MemoryLayout *layout, const BootInfo *info) {
+    UNUSED(layout);
+
+    if (!info || info->module_count == 0) {
+        kprintf("\nvm: no boot modules loaded.\n");
+        kprintf("vm: VM execution on this architecture requires hypervisor support (future work).\n");
+        return;
+    }
+
+    kprintf("\n--- Boot Module Detection ---\n");
+    kprintf("vm: %u module(s) loaded by bootloader:\n", info->module_count);
+    for (uint32_t i = 0; i < info->module_count; i++) {
+        const auto &m = info->modules[i];
+        kprintf("  [%u] %s  %llu MiB at 0x%llx\n",
+                i, m.name,
+                (unsigned long long)(m.size / (1024 * 1024)),
+                (unsigned long long)m.hpa);
+    }
+
+    // Attempt ISO store detection on first module
+    const auto &m0 = info->modules[0];
+    IsoStoreResult iso = iso_store_detect_and_select(m0.hpa, m0.size);
+    if (iso.found) {
+        kprintf("vm: ISO selected at 0x%llx (%llu MiB)\n",
+                (unsigned long long)iso.selected_hpa,
+                (unsigned long long)(iso.selected_size / (1024 * 1024)));
+    }
+
+    kprintf("vm: VM execution on this architecture requires hypervisor support (VT-x/AMD-V).\n");
+    kprintf("--- Boot Module Detection Complete ---\n\n");
+}
 
 #endif

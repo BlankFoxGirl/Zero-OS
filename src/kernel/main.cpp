@@ -3,7 +3,8 @@
 #include "memory.h"
 #include "arch_interface.h"
 
-extern "C" void vm_run_test_guest(const MemoryLayout *layout);
+extern "C" void vm_run_test_guest(const MemoryLayout *layout,
+                                  const BootInfo *info);
 
 static const char *memory_type_str(uint32_t type) {
     switch (type) {
@@ -110,9 +111,21 @@ MemoryLayout compute_memory_layout(uint64_t ram_base, uint64_t total_ram) {
         kprintf("  alloc  -> FAILED (out of memory)\n");
     }
 
-    kprintf("\nKernel initialisation complete.\n");
+    if (info.module_count > 0) {
+        kprintf("Boot modules (%u loaded by bootloader):\n", info.module_count);
+        for (uint32_t i = 0; i < info.module_count; i++) {
+            const auto &m = info.modules[i];
+            kprintf("  [%u] %s  %llu KiB at 0x%llx\n",
+                    i, m.name,
+                    (unsigned long long)(m.size / 1024),
+                    (unsigned long long)m.hpa);
+        }
+        kprintf("\n");
+    }
 
-    vm_run_test_guest(&layout);
+    kprintf("Kernel initialisation complete.\n");
+
+    vm_run_test_guest(&layout, &info);
 
     kprintf("System halting.\n");
     arch_halt();

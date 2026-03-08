@@ -71,6 +71,15 @@ void arch_early_init() {
 
 // ── Multiboot2 parsing ──────────────────────────────────────────────
 
+static void copy_module_name(char *dst, const char *src, uint32_t max_len) {
+    uint32_t i = 0;
+    while (i < max_len - 1 && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
     auto *mb = reinterpret_cast<Multiboot2FixedPart *>(
         static_cast<uintptr_t>(mb_info_addr));
@@ -97,6 +106,13 @@ static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
                 entry = reinterpret_cast<Multiboot2MmapEntry *>(
                     reinterpret_cast<uintptr_t>(entry) + mmap->entry_size);
             }
+        } else if (tag->type == MB2_TAG_MODULE &&
+                   info.module_count < MAX_BOOT_MODULES) {
+            auto *mod = reinterpret_cast<Multiboot2ModuleTag *>(tag);
+            auto &m = info.modules[info.module_count++];
+            m.hpa  = mod->mod_start;
+            m.size = mod->mod_end - mod->mod_start;
+            copy_module_name(m.name, mod->cmdline(), BOOT_MODULE_NAME_LEN);
         }
 
         uintptr_t next = reinterpret_cast<uintptr_t>(tag) + tag->size;
