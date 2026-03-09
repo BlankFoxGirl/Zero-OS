@@ -544,7 +544,7 @@ void vm_init() {}
 
 // ── Boot a disk image via OVMF firmware ─────────────────────────────
 
-static bool boot_disk_image(const MemoryLayout *layout, const BootInfo *info,
+static bool boot_disk_image(const MemoryLayout * /*layout*/, const BootInfo *info,
                             uint64_t disk_hpa, uint64_t disk_size) {
     FirmwareInfo fw{};
     if (!ovmf_find_module(info, &fw)) {
@@ -554,27 +554,35 @@ static bool boot_disk_image(const MemoryLayout *layout, const BootInfo *info,
         return false;
     }
 
-    kprintf("vm: OVMF firmware: %llu KiB at HPA 0x%llx\n",
+    kprintf("vm: OVMF firmware: %llu KiB at HPA 0x%llx  (2M-align: %s)\n",
             (unsigned long long)(fw.size / 1024),
-            (unsigned long long)fw.hpa);
+            (unsigned long long)fw.hpa,
+            (fw.hpa & 0x1FFFFF) == 0 ? "yes" : "NO");
 
-    uint64_t fw_gpa = OVMF_GPA_END - ALIGN_UP(fw.size, 0x200000);
+    // Map the firmware HPA in the host page tables so the IDE handler
+    // (and any future host-side reads) can access module memory.
+    ensure_physical_mapped(fw.hpa, fw.size);
+
+    // Also map the disk image — the IDE emulation does host-side memcpy
+    // from this address when the guest reads sectors.
+    ensure_physical_mapped(disk_hpa, disk_size);
+
+    uint64_t fw_map_size = ALIGN_UP(fw.size, PAGE_SIZE);
+    uint64_t fw_gpa = OVMF_GPA_END - fw_map_size;
     fw.guest_base = fw_gpa;
 
-    if (!svm_npt_map_firmware(fw_gpa, fw.hpa, ALIGN_UP(fw.size, 0x200000))) {
+    kprintf("vm: OVMF GPA 0x%llx–0x%llx  (%llu KiB)\n",
+            (unsigned long long)fw_gpa,
+            (unsigned long long)(fw_gpa + fw_map_size - 1),
+            (unsigned long long)(fw_map_size / 1024));
+
+    if (!svm_npt_map_firmware(fw_gpa, fw.hpa, fw_map_size)) {
         kprintf("vm: failed to map OVMF in guest address space\n");
         return false;
     }
 
-    // Low memory (0-1 MiB) must be mapped for real-mode IVT, BDA, etc.
-    // The NPT already covers guest RAM starting from guest_ram_hpa.
-    // If guest RAM doesn't start at 0, we need an extra mapping.
-    if (layout->guest_ram_hpa > 0) {
-        if (!svm_npt_map_firmware(0, layout->guest_ram_hpa, 0x200000)) {
-            kprintf("vm: failed to map low memory\n");
-            return false;
-        }
-    }
+    // Guest RAM is already mapped at GPA 0 by npt_build(), so low memory
+    // (IVT, BDA, etc.) is accessible without an extra mapping.
 
     svm_register_devices();
 

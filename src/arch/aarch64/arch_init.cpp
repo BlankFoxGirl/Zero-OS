@@ -52,6 +52,14 @@ void arch_early_init() {
         asm volatile("wfi");
 }
 
+bool arch_poll_ctrl_alt_del() {
+    return false;
+}
+
+[[noreturn]] void arch_reboot() {
+    arch_halt();
+}
+
 // ── EL2 exception stub (called from vectors.S) ──────────────────────
 
 static const char *vector_name(uint64_t idx) {

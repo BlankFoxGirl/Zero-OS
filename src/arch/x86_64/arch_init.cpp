@@ -241,6 +241,40 @@ void arch_early_init() {
         asm volatile("cli; hlt");
 }
 
+// ── PS/2 Ctrl+Alt+Delete detection ───────────────────────────────────
+// Scancode set 1: Ctrl=0x1D, Alt=0x38, Delete=0x53
+// Break codes have bit 7 set (e.g. Ctrl release = 0x9D).
+
+static bool s_ctrl_held = false;
+static bool s_alt_held  = false;
+
+bool arch_poll_ctrl_alt_del() {
+    while (kbd_has_data()) {
+        uint8_t sc = x86_inb(KBD_DATA);
+        switch (sc) {
+        case 0x1D: s_ctrl_held = true;  break;
+        case 0x9D: s_ctrl_held = false; break;
+        case 0x38: s_alt_held  = true;  break;
+        case 0xB8: s_alt_held  = false; break;
+        case 0x53:
+            if (s_ctrl_held && s_alt_held)
+                return true;
+            break;
+        }
+    }
+    return false;
+}
+
+[[noreturn]] void arch_reboot() {
+    // Pulse the CPU reset line via the 8042 keyboard controller
+    while (x86_inb(KBD_STATUS) & 0x02) {}
+    x86_outb(KBD_STATUS, 0xFE);
+
+    // Fallback: if the 8042 command didn't reset, just halt
+    for (;;)
+        asm volatile("cli; hlt");
+}
+
 // ── Multiboot2 parsing ──────────────────────────────────────────────
 
 static void copy_module_name(char *dst, const char *src, uint32_t max_len) {

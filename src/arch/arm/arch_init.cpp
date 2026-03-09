@@ -87,6 +87,14 @@ void arm_exception_handler(uint32_t type, uint32_t lr, uint32_t spsr) {
         asm volatile("wfi");
 }
 
+bool arch_poll_ctrl_alt_del() {
+    return false;
+}
+
+[[noreturn]] void arch_reboot() {
+    arch_halt();
+}
+
 // ── Entry point (called from boot_arm.S) ─────────────────────────────
 
 constexpr uint64_t QEMU_VIRT_RAM_BASE = 0x40000000;
