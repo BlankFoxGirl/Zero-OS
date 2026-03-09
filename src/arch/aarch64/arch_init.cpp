@@ -40,6 +40,9 @@ char arch_serial_getchar() {
     return static_cast<char>(mmio_read32(UART_DR) & 0xFF);
 }
 
+bool arch_console_has_input() { return arch_serial_has_data(); }
+char arch_console_getchar()   { return arch_serial_getchar(); }
+
 void arch_early_init() {
     // PL011 is pre-initialised by QEMU / firmware
 }

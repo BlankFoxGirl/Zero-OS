@@ -27,14 +27,54 @@ constexpr uint16_t COM1_LINE_CTRL  = COM1 + 3;
 constexpr uint16_t COM1_MODEM_CTRL = COM1 + 4;
 constexpr uint16_t COM1_LINE_STAT  = COM1 + 5;
 
+static bool serial_input_ok = false;
+
+static bool serial_loopback_test() {
+    uint8_t orig_mcr = x86_inb(COM1_MODEM_CTRL);
+    x86_outb(COM1_MODEM_CTRL, 0x1E);   // loopback + OUT2/OUT1/RTS
+    x86_outb(COM1_DATA, 0xAE);
+
+    for (volatile int i = 0; i < 10000; i++) {}
+
+    bool ok = (x86_inb(COM1_LINE_STAT) & 0x01) &&
+              (x86_inb(COM1_DATA) == 0xAE);
+
+    x86_outb(COM1_MODEM_CTRL, orig_mcr);
+    return ok;
+}
+
 static void serial_init() {
     x86_outb(COM1_INT_EN,     0x00);
     x86_outb(COM1_LINE_CTRL,  0x80);
     x86_outb(COM1 + 0,        0x01);   // 115200 baud
     x86_outb(COM1 + 1,        0x00);
     x86_outb(COM1_LINE_CTRL,  0x03);   // 8N1
-    x86_outb(COM1_FIFO,       0xC7);
+    x86_outb(COM1_FIFO,       0xC7);   // enable+clear FIFO
     x86_outb(COM1_MODEM_CTRL, 0x03);
+
+    if (!serial_loopback_test()) {
+        serial_input_ok = false;
+        return;
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (!(x86_inb(COM1_LINE_STAT) & 0x01))
+            break;
+        (void)x86_inb(COM1_DATA);
+    }
+
+    for (volatile int i = 0; i < 2000000; i++) {}
+
+    if (x86_inb(COM1_LINE_STAT) & 0x01) {
+        for (int i = 0; i < 16; i++) {
+            if (!(x86_inb(COM1_LINE_STAT) & 0x01))
+                break;
+            (void)x86_inb(COM1_DATA);
+        }
+        serial_input_ok = false;
+    } else {
+        serial_input_ok = true;
+    }
 }
 
 // ── arch_interface implementation ────────────────────────────────────
@@ -56,6 +96,50 @@ bool arch_serial_has_data() {
 char arch_serial_getchar() {
     while (!arch_serial_has_data()) {}
     return static_cast<char>(x86_inb(COM1_DATA));
+}
+
+// ── PS/2 keyboard (scancode set 1) ───────────────────────────────────
+
+constexpr uint16_t KBD_DATA   = 0x60;
+constexpr uint16_t KBD_STATUS = 0x64;
+
+static const char scancode_to_ascii[128] = {
+    0,  27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
+    '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+    0,  'a','s','d','f','g','h','j','k','l',';','\'','`',
+    0,  '\\','z','x','c','v','b','n','m',',','.','/', 0,
+    '*', 0, ' ',
+};
+
+static bool kbd_has_data() {
+    return x86_inb(KBD_STATUS) & 0x01;
+}
+
+static char kbd_try_read() {
+    uint8_t sc = x86_inb(KBD_DATA);
+    if (sc & 0x80)
+        return 0;
+    if (sc < sizeof(scancode_to_ascii))
+        return scancode_to_ascii[sc];
+    return 0;
+}
+
+bool arch_console_has_input() {
+    if (serial_input_ok && arch_serial_has_data())
+        return true;
+    return kbd_has_data();
+}
+
+char arch_console_getchar() {
+    for (;;) {
+        if (serial_input_ok && arch_serial_has_data())
+            return arch_serial_getchar();
+        if (kbd_has_data()) {
+            char c = kbd_try_read();
+            if (c)
+                return c;
+        }
+    }
 }
 
 void x86_idt_init();

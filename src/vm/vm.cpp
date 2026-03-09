@@ -6,6 +6,7 @@
 #include "console.h"
 #include "memory.h"
 #include "panic.h"
+#include "arch_interface.h"
 
 #ifdef __aarch64__
 
@@ -471,41 +472,298 @@ void vm_run_test_guest(const MemoryLayout *layout, const BootInfo *info) {
     vm_destroy(vm);
 }
 
-#else /* !__aarch64__ */
+#elif defined(__x86_64__)
+
+#include "x86/svm.h"
+#include "x86/guest_image.h"
+#include "x86/firmware.h"
+#include "x86/ide.h"
+
+static bool module_is_firmware(const BootModule *m) {
+    const char *name = m->name;
+    size_t len = 0;
+    while (name[len]) len++;
+
+    for (size_t i = 0; i + 3 < len; i++) {
+        char a = name[i], b = name[i+1], c = name[i+2], d = name[i+3];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (d >= 'A' && d <= 'Z') d += 32;
+        if (a == 'o' && b == 'v' && c == 'm' && d == 'f') return true;
+    }
+    for (size_t i = 0; i + 2 < len; i++) {
+        char a = name[i], b = name[i+1], c = name[i+2];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (a == '.' && b == 'f' && c == 'd') return true;
+    }
+    return false;
+}
+
+// ── x86_64 test guest: writes "VM!\n" to COM1 then halts ────────────
+
+static const uint8_t x86_test_guest[] = {
+    0xBA, 0xFD, 0x03,       // mov  dx, 0x3FD     ; LSR port
+    0xEC,                    // in   al, dx         ; read LSR
+    0xA8, 0x20,              // test al, 0x20       ; TX ready?
+    0x74, 0xFA,              // jz   -6             ; spin until ready
+    0xB0, 'V',              // mov  al, 'V'
+    0xBA, 0xF8, 0x03,       // mov  dx, 0x3F8      ; DATA port
+    0xEE,                    // out  dx, al
+
+    0xBA, 0xFD, 0x03,       // mov  dx, 0x3FD
+    0xEC,                    // in   al, dx
+    0xA8, 0x20,              // test al, 0x20
+    0x74, 0xFA,              // jz   -6
+    0xB0, 'M',
+    0xBA, 0xF8, 0x03,
+    0xEE,
+
+    0xBA, 0xFD, 0x03,
+    0xEC,
+    0xA8, 0x20,
+    0x74, 0xFA,
+    0xB0, '!',
+    0xBA, 0xF8, 0x03,
+    0xEE,
+
+    0xBA, 0xFD, 0x03,
+    0xEC,
+    0xA8, 0x20,
+    0x74, 0xFA,
+    0xB0, '\n',
+    0xBA, 0xF8, 0x03,
+    0xEE,
+
+    0xF4,                    // hlt
+};
+
+void vm_init() {}
+
+// ── Boot a disk image via OVMF firmware ─────────────────────────────
+
+static bool boot_disk_image(const MemoryLayout *layout, const BootInfo *info,
+                            uint64_t disk_hpa, uint64_t disk_size) {
+    FirmwareInfo fw{};
+    if (!ovmf_find_module(info, &fw)) {
+        kprintf("vm: OVMF firmware not found in boot modules.\n");
+        kprintf("vm: load OVMF_CODE.fd as a GRUB module2 alongside the "
+                "disk image.\n");
+        return false;
+    }
+
+    kprintf("vm: OVMF firmware: %llu KiB at HPA 0x%llx\n",
+            (unsigned long long)(fw.size / 1024),
+            (unsigned long long)fw.hpa);
+
+    uint64_t fw_gpa = OVMF_GPA_END - ALIGN_UP(fw.size, 0x200000);
+    fw.guest_base = fw_gpa;
+
+    if (!svm_npt_map_firmware(fw_gpa, fw.hpa, ALIGN_UP(fw.size, 0x200000))) {
+        kprintf("vm: failed to map OVMF in guest address space\n");
+        return false;
+    }
+
+    // Low memory (0-1 MiB) must be mapped for real-mode IVT, BDA, etc.
+    // The NPT already covers guest RAM starting from guest_ram_hpa.
+    // If guest RAM doesn't start at 0, we need an extra mapping.
+    if (layout->guest_ram_hpa > 0) {
+        if (!svm_npt_map_firmware(0, layout->guest_ram_hpa, 0x200000)) {
+            kprintf("vm: failed to map low memory\n");
+            return false;
+        }
+    }
+
+    svm_register_devices();
+
+    ide_init(disk_hpa, disk_size);
+
+    svm_configure_ovmf_entry();
+
+    kprintf("vm: entering OVMF firmware...\n\n");
+    bool ok = svm_run();
+    kprintf("\nvm: OVMF guest exited — %s\n", ok ? "clean" : "error");
+    return ok;
+}
+
+extern "C"
+void vm_run_test_guest(const MemoryLayout *layout, const BootInfo *info) {
+    kprintf("\n--- VM Initialisation (x86_64 SVM) ---\n");
+
+    // ── Detect AMD SVM ──────────────────────────────────────────
+    if (!svm_detect()) {
+        kprintf("vm: AMD SVM not available on this CPU.\n");
+
+        if (info && info->module_count > 0) {
+            kprintf("\n--- Boot Module Detection ---\n");
+            kprintf("vm: %u module(s) loaded by bootloader:\n", info->module_count);
+            for (uint32_t i = 0; i < info->module_count; i++) {
+                const auto &m = info->modules[i];
+                kprintf("  [%u] %s  %llu MiB at 0x%llx\n",
+                        i, m.name,
+                        (unsigned long long)(m.size / (1024 * 1024)),
+                        (unsigned long long)m.hpa);
+            }
+            kprintf("--- Boot Module Detection Complete ---\n\n");
+        }
+        return;
+    }
+
+    // ── Enable SVM ──────────────────────────────────────────────
+    if (!svm_init()) {
+        kprintf("vm: SVM initialisation failed.\n");
+        return;
+    }
+
+    // ── Create VM ───────────────────────────────────────────────
+    if (!layout || layout->guest_ram_size == 0) {
+        kprintf("vm: no guest RAM available in memory layout.\n");
+        return;
+    }
+
+    if (!svm_create_vm(layout->guest_ram_hpa, layout->guest_ram_size)) {
+        kprintf("vm: failed to create SVM guest.\n");
+        return;
+    }
+
+    // ── Determine guest image ───────────────────────────────────
+    uint64_t ramdisk_hpa  = layout->ramdisk_hpa;
+    uint64_t ramdisk_size = layout->ramdisk_size;
+
+    // Priority 1: EFI-loaded image (read from USB via UEFI firmware)
+    if (info && info->efi_image.loaded) {
+        kprintf("vm: using EFI-loaded image '%s' (%llu MiB) at 0x%llx\n",
+                info->efi_image.name,
+                (unsigned long long)(info->efi_image.size / (1024 * 1024)),
+                (unsigned long long)info->efi_image.hpa);
+        ramdisk_hpa  = info->efi_image.hpa;
+        ramdisk_size = info->efi_image.size;
+    }
+    // Priority 2: GRUB module (for BIOS boot or small images)
+    else if (info && info->module_count > 0) {
+        kprintf("\n--- Boot Module Detection ---\n");
+
+        const BootModule *guest_mods[MAX_BOOT_MODULES];
+        uint32_t guest_count = 0;
+
+        for (uint32_t i = 0; i < info->module_count; i++) {
+            const auto &m = info->modules[i];
+            bool is_fw = module_is_firmware(&m);
+            kprintf("  [%u] %s  %llu MiB (%llu bytes) at 0x%llx%s\n",
+                    i, m.name,
+                    (unsigned long long)(m.size / (1024 * 1024)),
+                    (unsigned long long)m.size,
+                    (unsigned long long)m.hpa,
+                    is_fw ? "  [firmware]" : "");
+            if (!is_fw)
+                guest_mods[guest_count++] = &m;
+        }
+
+        if (guest_count == 0) {
+            kprintf("vm: no guest images found in boot modules\n");
+            ramdisk_size = 0;
+        } else if (guest_count == 1) {
+            const auto *gm = guest_mods[0];
+            kprintf("\nvm: 1 guest image available:\n");
+            kprintf("  [1]  %s  (%llu MiB)\n",
+                    gm->name,
+                    (unsigned long long)(gm->size / (1024 * 1024)));
+            kprintf("vm: auto-selecting '%s'\n", gm->name);
+
+            IsoStoreResult iso = iso_store_detect_and_select(
+                gm->hpa, gm->size);
+            if (iso.found) {
+                ramdisk_hpa  = iso.selected_hpa;
+                ramdisk_size = iso.selected_size;
+            } else {
+                ramdisk_hpa  = gm->hpa;
+                ramdisk_size = gm->size;
+            }
+        } else {
+            kprintf("\n");
+            kprintf("========================================\n");
+            kprintf("  ZeroOS — Select Guest Image\n");
+            kprintf("========================================\n\n");
+
+            for (uint32_t i = 0; i < guest_count; i++) {
+                uint64_t size_mib = guest_mods[i]->size / (1024 * 1024);
+                kprintf("  [%u]  %s  (%llu MiB)\n",
+                        i + 1, guest_mods[i]->name,
+                        (unsigned long long)size_mib);
+            }
+
+            kprintf("\nSelect [1-%u]: ", guest_count);
+
+            uint32_t choice = 0;
+            for (;;) {
+                char c = arch_console_getchar();
+                if (c >= '1' && c <= '9') {
+                    uint32_t sel = static_cast<uint32_t>(c - '0');
+                    if (sel >= 1 && sel <= guest_count) {
+                        kprintf("%c\n\n", c);
+                        choice = sel - 1;
+                        break;
+                    }
+                }
+            }
+
+            const auto *gm = guest_mods[choice];
+            kprintf("vm: selected '%s' (%llu MiB)\n",
+                    gm->name,
+                    (unsigned long long)(gm->size / (1024 * 1024)));
+            ramdisk_hpa  = gm->hpa;
+            ramdisk_size = gm->size;
+        }
+        kprintf("--- Boot Module Detection Complete ---\n\n");
+    }
+
+    // ── Classify image and branch ───────────────────────────────
+    // ensure_physical_mapped is defined in arch_init.cpp
+    extern bool ensure_physical_mapped(uint64_t phys_start, uint64_t size);
+
+    GuestImageType img_type = GuestImageType::Unknown;
+    if (ramdisk_size > 0) {
+        uint64_t probe_size = (ramdisk_size < 0x200000) ? ramdisk_size : 0x200000;
+        ensure_physical_mapped(ramdisk_hpa, probe_size);
+        img_type = classify_guest_image(ramdisk_hpa, ramdisk_size);
+    }
+
+    switch (img_type) {
+    case GuestImageType::DiskImage:
+        kprintf("vm: disk image detected — booting via OVMF\n");
+        boot_disk_image(layout, info, ramdisk_hpa, ramdisk_size);
+        break;
+
+    case GuestImageType::ISO9660:
+        kprintf("vm: ISO 9660 image detected — booting via OVMF\n");
+        boot_disk_image(layout, info, ramdisk_hpa, ramdisk_size);
+        break;
+
+    default:
+        kprintf("vm: no guest image found, running test guest...\n");
+        kprintf("vm: loading x86 test guest (%u bytes)...\n",
+                static_cast<unsigned>(sizeof(x86_test_guest)));
+        svm_load_image(x86_test_guest, sizeof(x86_test_guest), 0);
+
+        bool ok = svm_run();
+        kprintf("vm: guest exited — %s\n", ok ? "clean" : "error");
+        break;
+    }
+
+    kprintf("--- VM Complete ---\n\n");
+}
+
+#else /* 32-bit x86 or other non-aarch64 */
 
 void vm_init() {}
 
 extern "C"
 void vm_run_test_guest(const MemoryLayout *layout, const BootInfo *info) {
     UNUSED(layout);
-
-    if (!info || info->module_count == 0) {
-        kprintf("\nvm: no boot modules loaded.\n");
-        kprintf("vm: VM execution on this architecture requires hypervisor support (future work).\n");
-        return;
-    }
-
-    kprintf("\n--- Boot Module Detection ---\n");
-    kprintf("vm: %u module(s) loaded by bootloader:\n", info->module_count);
-    for (uint32_t i = 0; i < info->module_count; i++) {
-        const auto &m = info->modules[i];
-        kprintf("  [%u] %s  %llu MiB at 0x%llx\n",
-                i, m.name,
-                (unsigned long long)(m.size / (1024 * 1024)),
-                (unsigned long long)m.hpa);
-    }
-
-    // Attempt ISO store detection on first module
-    const auto &m0 = info->modules[0];
-    IsoStoreResult iso = iso_store_detect_and_select(m0.hpa, m0.size);
-    if (iso.found) {
-        kprintf("vm: ISO selected at 0x%llx (%llu MiB)\n",
-                (unsigned long long)iso.selected_hpa,
-                (unsigned long long)(iso.selected_size / (1024 * 1024)));
-    }
-
-    kprintf("vm: VM execution on this architecture requires hypervisor support (VT-x/AMD-V).\n");
-    kprintf("--- Boot Module Detection Complete ---\n\n");
+    UNUSED(info);
+    kprintf("\nvm: VM execution not supported on this architecture.\n");
 }
 
 #endif

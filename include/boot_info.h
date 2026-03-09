@@ -33,6 +33,19 @@ struct FramebufferInfo {
     bool     available;
 };
 
+struct EfiInfo {
+    void    *system_table;
+    void    *image_handle;
+    bool     bs_active;      // EFI Boot Services still available
+};
+
+struct EfiLoadedImage {
+    bool     loaded;
+    uint64_t hpa;
+    uint64_t size;
+    char     name[64];
+};
+
 struct BootInfo {
     const char  *arch_name;
     MemoryRegion memory_regions[MAX_MEMORY_REGIONS];
@@ -42,6 +55,8 @@ struct BootInfo {
     BootModule   modules[MAX_BOOT_MODULES];
     uint32_t     module_count;
     FramebufferInfo framebuffer;
+    EfiInfo      efi;
+    EfiLoadedImage efi_image;
 };
 
 // ── Memory layout policy ─────────────────────────────────────────────

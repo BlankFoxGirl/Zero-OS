@@ -85,6 +85,61 @@ Optionally pass an initrd:
 make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
 ```
 
+#### Booting disk images via OVMF (x86_64)
+
+ZeroOS can boot full OS installations from raw disk images using OVMF UEFI firmware. Create a disk image with VirtualBox or similar, convert to raw format, and boot:
+
+```bash
+# Convert VirtualBox VDI to raw
+VBoxManage clonehd myvm.vdi myvm.img --format RAW
+
+# Download OVMF firmware (one-time)
+make firmware
+
+# For USB deployment, copy the raw image to the exFAT partition and run:
+make usb USB_BOOT=/Volumes/ZEROOS_BOOT USB_ISO=/Volumes/ZEROOS_ISO
+```
+
+The kernel auto-detects the image format (ISO 9660, GPT disk image, or MBR disk image) and boots via OVMF when a disk image is detected. OVMF firmware is loaded alongside the image as a GRUB module.
+
+### USB Boot
+
+ZeroOS boots from a USB stick with two GPT partitions:
+
+| Partition | Filesystem | Size | Purpose |
+|-----------|-----------|------|---------|
+| 1 | FAT32 | ~1 GB | EFI boot partition (GRUB + kernel ELFs) |
+| 2 | exFAT | Remaining | Guest image store (ISOs, disk images) |
+
+exFAT is used for the image store to support files larger than 4 GB (e.g. full Windows or Linux VM images).
+
+**Format the USB (macOS):**
+
+```bash
+diskutil partitionDisk /dev/diskN GPT \
+  FAT32 ZEROOS_BOOT 1G \
+  ExFAT ZEROOS_ISO R
+```
+
+**Format the USB (Linux):**
+
+```bash
+sudo parted /dev/sdX mklabel gpt
+sudo parted /dev/sdX mkpart ZEROOS_BOOT fat32 1MiB 1025MiB
+sudo parted /dev/sdX mkpart ZEROOS_ISO 1025MiB 100%
+sudo parted /dev/sdX set 1 esp on
+sudo mkfs.fat -F32 -n ZEROOS_BOOT /dev/sdX1
+sudo mkfs.exfat -L ZEROOS_ISO /dev/sdX2
+```
+
+**Deploy to USB:**
+
+```bash
+make usb USB_BOOT=/Volumes/ZEROOS_BOOT USB_ISO=/Volumes/ZEROOS_ISO
+```
+
+Then copy your guest images (`.iso`, `.img`, etc.) onto the `ZEROOS_ISO` partition.
+
 ### Cleaning
 
 ```bash

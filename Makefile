@@ -107,8 +107,8 @@ DEPS := $(OBJS:.o=.d)
 
 # ── Phony targets ───────────────────────────────────────────────────
 
-.PHONY: kernel iso image iso-store usb clean all \
-        run-x86 run-x86_64 run-arm run-aarch64 run-aarch64-vm
+.PHONY: kernel iso image iso-store usb clean all firmware \
+        run-x86 run-x86_64 run-x86_64-svm run-arm run-aarch64 run-aarch64-vm
 
 # ── Default target ───────────────────────────────────────────────────
 
@@ -171,6 +171,28 @@ iso: kernel
 	$(CROSS)grub-mkrescue -o $(ISO) $(BUILD)/isodir
 	@echo "[$(ARCH)] ISO ready: $(ISO)"
 
+# ── OVMF firmware download ────────────────────────────────────────────
+#
+# Downloads a prebuilt OVMF x86_64 UEFI firmware binary for use as
+# guest firmware when booting disk images.
+
+OVMF_DIR   := build/firmware
+OVMF_CODE  := $(OVMF_DIR)/OVMF_CODE.fd
+OVMF_RELEASE := edk2-stable202602-r1
+OVMF_URL   := https://github.com/rust-osdev/ovmf-prebuilt/releases/download/$(OVMF_RELEASE)/$(OVMF_RELEASE)-bin.tar.xz
+
+firmware: $(OVMF_CODE)
+
+$(OVMF_CODE):
+	@mkdir -p $(OVMF_DIR)
+	@echo "[firmware] Downloading OVMF ($(OVMF_RELEASE))..."
+	curl -L -o $(OVMF_DIR)/ovmf.tar.xz $(OVMF_URL)
+	tar -xJf $(OVMF_DIR)/ovmf.tar.xz -C $(OVMF_DIR) --strip-components=2 '*/x64/code.fd'
+	mv $(OVMF_DIR)/code.fd $(OVMF_CODE)
+	rm -f $(OVMF_DIR)/ovmf.tar.xz
+	@ls -la $(OVMF_CODE)
+	@echo "[firmware] OVMF ready: $(OVMF_CODE)"
+
 # ── USB deployment (all architectures) ───────────────────────────────
 #
 # Deploy ZeroOS to a partitioned USB stick.
@@ -178,8 +200,21 @@ iso: kernel
 # Prerequisites:
 #   The USB must have two GPT partitions:
 #     Partition 1 (FAT32, ~1 GB)  — EFI/boot partition, mounted at USB_BOOT
-#     Partition 2 (FAT32, rest)   — ISO store,           mounted at USB_ISO
+#     Partition 2 (exFAT, rest)   — ISO/image store,    mounted at USB_ISO
 #   Requires: x86_64-elf-grub-mkstandalone (from x86_64-elf-grub)
+#
+# Formatting the USB (macOS):
+#   diskutil partitionDisk /dev/diskN GPT \
+#     FAT32 ZEROOS_BOOT 1G \
+#     ExFAT ZEROOS_ISO R
+#
+# Formatting the USB (Linux):
+#   sudo parted /dev/sdX mklabel gpt
+#   sudo parted /dev/sdX mkpart ZEROOS_BOOT fat32 1MiB 1025MiB
+#   sudo parted /dev/sdX mkpart ZEROOS_ISO 1025MiB 100%
+#   sudo parted /dev/sdX set 1 esp on
+#   sudo mkfs.fat -F32 -n ZEROOS_BOOT /dev/sdX1
+#   sudo mkfs.exfat -L ZEROOS_ISO /dev/sdX2
 #
 # Usage:
 #   make usb USB_BOOT=/Volumes/ZEROOS_BOOT USB_ISO=/Volumes/ZEROOS_ISO
@@ -188,7 +223,7 @@ iso: kernel
 #   1. Builds kernels for all architectures
 #   2. Builds a standalone GRUB EFI binary (BOOTX64.EFI)
 #   3. Copies EFI binary + all kernel ELFs to the boot partition
-#   4. Generates grub.cfg with module2 lines for each ISO on USB_ISO
+#   4. Generates grub.cfg with module2 lines for each image on USB_ISO
 
 USB_BOOT ?=
 USB_ISO  ?=
@@ -210,12 +245,13 @@ endif
 	fi
 	@echo "[usb] Building kernels for all architectures..."
 	@$(MAKE) --no-print-directory all
+	@$(MAKE) --no-print-directory firmware
 	@echo "[usb] Building standalone GRUB EFI bootloader..."
 	@mkdir -p build/efi_staging
 	@printf 'search --set=root --file /boot/zeroos-x86_64.elf\nconfigfile /boot/grub/grub.cfg\n' \
 		> build/efi_staging/grub_embed.cfg
 	x86_64-elf-grub-mkstandalone --format=x86_64-efi \
-		--modules="part_gpt part_msdos fat normal search configfile" \
+		--modules="part_gpt part_msdos fat exfat normal search configfile multiboot2" \
 		--output=build/efi_staging/BOOTX64.EFI \
 		--locales="" --fonts="" \
 		"boot/grub/grub.cfg=build/efi_staging/grub_embed.cfg"
@@ -227,10 +263,13 @@ endif
 	@cp $(BIN)/zeroos-x86.elf     "$(USB_BOOT)/boot/zeroos-x86.elf"
 	@cp $(BIN)/zeroos-aarch64.elf "$(USB_BOOT)/boot/zeroos-aarch64.elf"
 	@cp $(BIN)/zeroos-arm.elf     "$(USB_BOOT)/boot/zeroos-arm.elf"
+	@echo "[usb] Copying OVMF firmware..."
+	@cp $(OVMF_CODE) "$(USB_BOOT)/boot/OVMF_CODE.fd"
 	@echo "[usb] Marking ISO store partition..."
 	@touch "$(USB_ISO)/.zeroos_iso_store"
+	@mkdir -p "$(USB_BOOT)/boot/images"
 	@echo "[usb] Generating grub.cfg..."
-	@scripts/gen_grub_cfg.sh "$(USB_ISO)" "$(USB_BOOT)/boot/grub/grub.cfg"
+	@scripts/gen_grub_cfg.sh "$(USB_ISO)" "$(USB_BOOT)/boot/grub/grub.cfg" "$(USB_BOOT)"
 	@echo "[usb] USB deployment complete."
 	@echo "  Boot partition: $(USB_BOOT)"
 	@echo "  ISO partition:  $(USB_ISO)"
@@ -265,6 +304,14 @@ run-x86_64:
 	@$(MAKE) --no-print-directory ARCH=x86_64 kernel
 	qemu-system-x86_64 -kernel $(BIN)/zeroos-x86_64.elf -m $(QEMU_RAM) $(QEMU_COMMON)
 
+# Run x86_64 with KVM enabled (required for SVM/VT-x testing in QEMU).
+# Host must have AMD-V or VT-x enabled.  QEMU will expose the host's
+# hardware virtualisation extensions to the guest kernel.
+run-x86_64-svm:
+	@$(MAKE) --no-print-directory ARCH=x86_64 kernel
+	qemu-system-x86_64 -enable-kvm -cpu host \
+		-kernel $(BIN)/zeroos-x86_64.elf -m $(QEMU_RAM) $(QEMU_COMMON)
+
 run-arm:
 	@$(MAKE) --no-print-directory ARCH=arm kernel
 	qemu-system-arm -M virt -kernel $(BIN)/zeroos-arm.elf -m $(QEMU_RAM) $(QEMU_COMMON)
@@ -282,7 +329,7 @@ run-aarch64:
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image              (raw kernel)
 #   make run-aarch64-vm GUEST_KERNEL=path/to/Image GUEST_INITRD=path/to/initrd
 #
-# Multiple ISOs (FAT32 ISO store):
+# Multiple ISOs (FAT32 ISO store — QEMU only):
 #   make run-aarch64-vm GUEST_ISO_DIR=path/to/isos/
 #
 # Options:

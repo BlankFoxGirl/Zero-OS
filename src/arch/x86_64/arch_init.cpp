@@ -4,19 +4,27 @@
 #include "console.h"
 #include "fb_console.h"
 #include "string.h"
+#include "x86/msr.h"
+
+#ifdef __x86_64__
+#include "x86/efi.h"
+#endif
 
 // ── Dynamic page-table mapping ───────────────────────────────────────
 //
 // The boot code identity-maps 0–4 GiB.  GPU framebuffers on UEFI
 // systems can live above 4 GiB, so we dynamically add 2 MiB-page
 // mappings for any physical region the kernel needs at runtime.
+// 128 spare PDs = up to 132 GiB total identity mapping.
 
+extern "C" uint64_t pml4[];
 extern "C" uint64_t pdpt[];
+extern "C" void switch_to_kernel_gdt();
 
-alignas(4096) static uint64_t spare_pds[4][512];
+alignas(4096) static uint64_t spare_pds[128][512];
 static uint32_t spare_pd_used = 0;
 
-static bool ensure_physical_mapped(uint64_t phys_start, uint64_t size) {
+extern "C" bool ensure_physical_mapped(uint64_t phys_start, uint64_t size) {
     uint64_t phys_end = phys_start + size;
     if (phys_end <= 0x100000000ULL)
         return true;
@@ -28,7 +36,7 @@ static bool ensure_physical_mapped(uint64_t phys_start, uint64_t size) {
             return false;
 
         if (!(pdpt[idx] & 1)) {
-            if (spare_pd_used >= 4)
+            if (spare_pd_used >= 128)
                 return false;
 
             uint64_t *new_pd = spare_pds[spare_pd_used++];
@@ -53,19 +61,7 @@ static bool ensure_physical_mapped(uint64_t phys_start, uint64_t size) {
 // table entries so framebuffer writes are buffered and flushed in
 // bursts — typically a 10–100× speedup.
 
-static inline uint64_t x86_rdmsr(uint32_t msr) {
-    uint32_t lo, hi;
-    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
-    return (static_cast<uint64_t>(hi) << 32) | lo;
-}
-
-static inline void x86_wrmsr(uint32_t msr, uint64_t val) {
-    asm volatile("wrmsr" : : "c"(msr),
-                 "a"(static_cast<uint32_t>(val)),
-                 "d"(static_cast<uint32_t>(val >> 32)));
-}
-
-constexpr uint32_t MSR_PAT = 0x277;
+// MSR helpers and constants now in include/x86/msr.h
 
 static void setup_pat_wc() {
     uint64_t pat = x86_rdmsr(MSR_PAT);
@@ -115,14 +111,54 @@ constexpr uint16_t COM1_LINE_CTRL  = COM1 + 3;
 constexpr uint16_t COM1_MODEM_CTRL = COM1 + 4;
 constexpr uint16_t COM1_LINE_STAT  = COM1 + 5;
 
+static bool serial_input_ok = false;
+
+static bool serial_loopback_test() {
+    uint8_t orig_mcr = x86_inb(COM1_MODEM_CTRL);
+    x86_outb(COM1_MODEM_CTRL, 0x1E);   // loopback + OUT2/OUT1/RTS
+    x86_outb(COM1_DATA, 0xAE);
+
+    for (volatile int i = 0; i < 10000; i++) {}
+
+    bool ok = (x86_inb(COM1_LINE_STAT) & 0x01) &&
+              (x86_inb(COM1_DATA) == 0xAE);
+
+    x86_outb(COM1_MODEM_CTRL, orig_mcr);
+    return ok;
+}
+
 static void serial_init() {
     x86_outb(COM1_INT_EN,     0x00);   // disable interrupts
     x86_outb(COM1_LINE_CTRL,  0x80);   // enable DLAB
     x86_outb(COM1 + 0,        0x01);   // divisor lo  (115200 baud)
     x86_outb(COM1 + 1,        0x00);   // divisor hi
     x86_outb(COM1_LINE_CTRL,  0x03);   // 8N1
-    x86_outb(COM1_FIFO,       0xC7);   // enable FIFO, 14-byte threshold
+    x86_outb(COM1_FIFO,       0xC7);   // enable+clear FIFO, 14-byte threshold
     x86_outb(COM1_MODEM_CTRL, 0x03);   // RTS + DTR
+
+    if (!serial_loopback_test()) {
+        serial_input_ok = false;
+        return;
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (!(x86_inb(COM1_LINE_STAT) & 0x01))
+            break;
+        (void)x86_inb(COM1_DATA);
+    }
+
+    for (volatile int i = 0; i < 2000000; i++) {}
+
+    if (x86_inb(COM1_LINE_STAT) & 0x01) {
+        for (int i = 0; i < 16; i++) {
+            if (!(x86_inb(COM1_LINE_STAT) & 0x01))
+                break;
+            (void)x86_inb(COM1_DATA);
+        }
+        serial_input_ok = false;
+    } else {
+        serial_input_ok = true;
+    }
 }
 
 // ── arch_interface implementation ────────────────────────────────────
@@ -144,6 +180,52 @@ bool arch_serial_has_data() {
 char arch_serial_getchar() {
     while (!arch_serial_has_data()) {}
     return static_cast<char>(x86_inb(COM1_DATA));
+}
+
+// ── PS/2 keyboard (scancode set 1) ───────────────────────────────────
+
+constexpr uint16_t KBD_DATA   = 0x60;
+constexpr uint16_t KBD_STATUS = 0x64;
+
+static const char scancode_to_ascii[128] = {
+    0,  27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
+    '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+    0,  'a','s','d','f','g','h','j','k','l',';','\'','`',
+    0,  '\\','z','x','c','v','b','n','m',',','.','/', 0,
+    '*', 0, ' ',
+};
+
+static bool kbd_has_data() {
+    return x86_inb(KBD_STATUS) & 0x01;
+}
+
+static char kbd_try_read() {
+    uint8_t sc = x86_inb(KBD_DATA);
+    if (sc & 0x80)
+        return 0;       // key release, ignore
+    if (sc < sizeof(scancode_to_ascii))
+        return scancode_to_ascii[sc];
+    return 0;
+}
+
+// ── Console input (serial + keyboard) ────────────────────────────────
+
+bool arch_console_has_input() {
+    if (serial_input_ok && arch_serial_has_data())
+        return true;
+    return kbd_has_data();
+}
+
+char arch_console_getchar() {
+    for (;;) {
+        if (serial_input_ok && arch_serial_has_data())
+            return arch_serial_getchar();
+        if (kbd_has_data()) {
+            char c = kbd_try_read();
+            if (c)
+                return c;
+        }
+    }
 }
 
 void x86_64_idt_init();
@@ -211,6 +293,16 @@ static void parse_multiboot2(uint32_t mb_info_addr, BootInfo &info) {
             m.hpa  = mod->mod_start;
             m.size = mod->mod_end - mod->mod_start;
             copy_module_name(m.name, mod->cmdline(), BOOT_MODULE_NAME_LEN);
+        } else if (tag->type == MB2_TAG_EFI_ST64) {
+            auto *efi_st = reinterpret_cast<uintptr_t *>(
+                reinterpret_cast<uintptr_t>(tag) + 8);
+            info.efi.system_table = reinterpret_cast<void *>(*efi_st);
+        } else if (tag->type == MB2_TAG_EFI_BS) {
+            info.efi.bs_active = true;
+        } else if (tag->type == MB2_TAG_EFI_IMG_HANDLE64) {
+            auto *efi_ih = reinterpret_cast<uintptr_t *>(
+                reinterpret_cast<uintptr_t>(tag) + 8);
+            info.efi.image_handle = reinterpret_cast<void *>(*efi_ih);
         }
 
         uintptr_t next = reinterpret_cast<uintptr_t>(tag) + tag->size;
@@ -264,7 +356,10 @@ static void derive_ram_totals(BootInfo &info) {
 
 extern "C" [[noreturn]]
 void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
-    arch_early_init();
+    // Serial + PAT are safe with any GDT (only touch I/O ports and MSRs).
+    // IDT and framebuffer mapping are deferred until our GDT + CR3 are live.
+    serial_init();
+    setup_pat_wc();
 
     BootInfo info{};
     info.arch_name           = "x86_64";
@@ -278,14 +373,68 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
         kprintf("WARNING: unknown multiboot magic 0x%x\n", mb_magic);
     }
 
-    derive_ram_totals(info);
+    // ── EFI image loading ────────────────────────────────────────
+    // _start_efi64 kept the firmware's GDT, segments, and CR3 intact
+    // so that EFI protocol calls work.  We must finish all EFI work
+    // BEFORE loading our own GDT/IDT/CR3.
+#ifdef __x86_64__
+    if (info.efi.bs_active && info.efi.system_table) {
+        // Bring up the framebuffer early so the image selection menu
+        // is visible on screen.  During EFI boot the firmware's page
+        // tables already identity-map the framebuffer MMIO region.
+        // WC optimisation is applied later after switching to our CR3.
+        if (info.framebuffer.available)
+            fb_init(info.framebuffer);
+
+        kprintf("efi: Boot Services active — loading guest image via UEFI\n");
+
+        // GRUB doesn't provide the Multiboot2 memory map tag when EFI BS
+        // are preserved.  Get the memory map directly from EFI firmware.
+        efi_populate_memory_map(info.efi.system_table, &info);
+        derive_ram_totals(info);
+
+        MemoryLayout layout = compute_memory_layout(info.ram_base,
+                                                    info.total_ram);
+        EfiLoadResult efi_result{};
+        if (efi_load_guest_image(info.efi.system_table,
+                                 info.efi.image_handle,
+                                 layout.ramdisk_hpa,
+                                 layout.ramdisk_size,
+                                 &efi_result)) {
+            info.efi_image.loaded = true;
+            info.efi_image.hpa    = efi_result.hpa;
+            info.efi_image.size   = efi_result.size;
+            memcpy(info.efi_image.name, efi_result.name,
+                   sizeof(info.efi_image.name));
+        }
+
+        efi_exit_boot_services(info.efi.system_table,
+                               info.efi.image_handle);
+        info.efi.bs_active = false;
+
+        // Firmware is gone — switch to our GDT, segments, and page tables.
+        switch_to_kernel_gdt();
+
+        asm volatile("mov %0, %%cr3" :: "r"(reinterpret_cast<uint64_t>(pml4))
+                     : "memory");
+        kprintf("efi: switched to kernel GDT + page tables\n");
+    } else
+#endif
+    {
+        // Non-EFI path: memory map came from Multiboot2 MMAP tag.
+        derive_ram_totals(info);
+    }
+
+    // Our GDT is now active (loaded by _start for BIOS, or above for EFI).
+    x86_64_idt_init();
 
     if (info.framebuffer.available) {
         uint64_t fb_size = static_cast<uint64_t>(info.framebuffer.pitch)
                          * info.framebuffer.height;
         if (ensure_physical_mapped(info.framebuffer.addr, fb_size)) {
             set_wc_for_range(info.framebuffer.addr, fb_size);
-            fb_init(info.framebuffer);
+            if (!fb_available())
+                fb_init(info.framebuffer);
         }
     }
 
