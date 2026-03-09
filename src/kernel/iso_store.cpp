@@ -80,6 +80,8 @@ IsoStoreResult iso_store_detect_and_select(uint64_t store_hpa, uint64_t store_si
         Fat32File *f = &dir_entries[i];
         if (f->is_directory || f->file_size == 0)
             continue;
+        if (f->name[0] == '.')
+            continue;
         if (!has_iso_extension(f->name))
             continue;
 

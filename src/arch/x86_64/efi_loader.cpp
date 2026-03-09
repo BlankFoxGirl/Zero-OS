@@ -66,6 +66,8 @@ static uint32_t scan_volume(EFI_FILE_PROTOCOL *root,
         char ascii_name[64];
         ucs2_to_ascii(ascii_name, fi->FileName, sizeof(ascii_name));
 
+        if (ascii_name[0] == '.')
+            continue;
         if (!has_image_ext(ascii_name))
             continue;
         if (offset + count >= max_entries)
@@ -197,6 +199,7 @@ static uint32_t exfat_scan_dir(ExFatFs *fs, ExFatFile *files,
         switch (type) {
         case 0x85: {
             if (state == GOT_STREAM &&
+                cur.name[0] != '.' &&
                 has_image_ext(cur.name) && cur.data_length > 0)
                 files[count++] = cur;
 
@@ -235,6 +238,7 @@ static uint32_t exfat_scan_dir(ExFatFs *fs, ExFatFile *files,
     }
 
     if (state == GOT_STREAM &&
+        cur.name[0] != '.' &&
         has_image_ext(cur.name) && cur.data_length > 0 &&
         count < max_files)
         files[count++] = cur;

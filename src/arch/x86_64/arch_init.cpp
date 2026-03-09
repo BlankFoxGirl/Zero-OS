@@ -412,11 +412,34 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
                                info.efi.image_handle);
         info.efi.bs_active = false;
 
+        // Pre-map the framebuffer in our kernel page tables BEFORE
+        // switching CR3.  On UEFI systems the FB often lives above
+        // 4 GiB; without this mapping the first kprintf after the
+        // CR3 switch triple-faults (page fault with no IDT loaded).
+        if (info.framebuffer.available) {
+            uint64_t fb_size = static_cast<uint64_t>(info.framebuffer.pitch)
+                             * info.framebuffer.height;
+            ensure_physical_mapped(info.framebuffer.addr, fb_size);
+        }
+
         // Firmware is gone — switch to our GDT, segments, and page tables.
         switch_to_kernel_gdt();
 
         asm volatile("mov %0, %%cr3" :: "r"(reinterpret_cast<uint64_t>(pml4))
                      : "memory");
+
+        // IDT must be live before any kprintf — a stray fault with
+        // no IDT cascades into a triple fault and CPU reset.
+        x86_64_idt_init();
+
+        // Apply write-combining for framebuffer performance now that
+        // our page tables are active.
+        if (info.framebuffer.available) {
+            uint64_t fb_size = static_cast<uint64_t>(info.framebuffer.pitch)
+                             * info.framebuffer.height;
+            set_wc_for_range(info.framebuffer.addr, fb_size);
+        }
+
         kprintf("efi: switched to kernel GDT + page tables\n");
     } else
 #endif
