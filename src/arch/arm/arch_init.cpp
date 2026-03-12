@@ -40,6 +40,9 @@ char arch_serial_getchar() {
     return static_cast<char>(mmio_read32(UART_DR) & 0xFF);
 }
 
+bool arch_console_has_input() { return arch_serial_has_data(); }
+char arch_console_getchar()   { return arch_serial_getchar(); }
+
 extern "C" void arm_vector_table();
 
 static void arm_install_vectors() {
@@ -82,6 +85,14 @@ void arm_exception_handler(uint32_t type, uint32_t lr, uint32_t spsr) {
 [[noreturn]] void arch_halt() {
     for (;;)
         asm volatile("wfi");
+}
+
+bool arch_poll_ctrl_alt_del() {
+    return false;
+}
+
+[[noreturn]] void arch_reboot() {
+    arch_halt();
 }
 
 // ── Entry point (called from boot_arm.S) ─────────────────────────────

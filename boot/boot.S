@@ -1,9 +1,11 @@
 /*
  * boot.S — Multiboot2 bootstrap for x86_64
  *
- * GRUB loads this ELF and enters _start in 32-bit protected mode.
- * We build identity-mapped page tables, transition to 64-bit long
- * mode, then call kernel_main(uint32_t mb_magic, uint32_t mb_info).
+ * Two entry paths:
+ *   _start      — 32-bit protected mode (BIOS / QEMU -kernel)
+ *   _start_efi64 — 64-bit long mode (UEFI with EFI BS preserved)
+ *
+ * Both paths end by calling kernel_main(mb_magic, mb_info_addr).
  */
 
 /* Multiboot2 */
@@ -53,6 +55,21 @@ mb2_hdr_start:
     .long  0                        /* preferred height (0 = any) */
     .long  32                       /* preferred bpp       */
 
+    /* Request EFI Boot Services NOT be terminated. */
+    .align 8
+    .short 7                        /* type  — EFI boot services */
+    .short 0                        /* flags — required          */
+    .long  8                        /* tag size                  */
+
+    /* 64-bit EFI entry point.  When GRUB boots on UEFI with EFI BS
+       preserved, it cannot switch to 32-bit mode (that would break
+       EFI firmware).  This tag provides a 64-bit entry instead. */
+    .align 8
+    .short 9                        /* type  — entry address EFI amd64 */
+    .short 0                        /* flags — required                */
+    .long  12                       /* tag size                        */
+    .long  _start_efi64             /* 64-bit entry physical address   */
+
     /* Terminating tag */
     .align 8
     .short 0
@@ -70,6 +87,7 @@ mb1_hdr:
 
 /* ================================================================
    32-bit entry point (protected mode, paging off)
+   Used by BIOS boot and QEMU -kernel.
    ================================================================ */
 
 .section .text
@@ -79,40 +97,22 @@ _start:
     cli
     cld
 
-    /*
-     * Preserve the two values GRUB passes us:
-     *   eax = Multiboot2 bootloader magic (0x36d76289)
-     *   ebx = physical address of Multiboot2 info structure
-     * We stash them in callee-saved registers that survive the
-     * entire 32-bit setup sequence and the mode switch.
-     */
     mov %eax, %ebp
-    /* ebx is already where we want it */
+    /* ebx already holds MB info pointer */
 
-    /* ---- Zero BSS (covers page tables + stack) ---- */
+    /* ---- Zero BSS ---- */
     mov $__bss_start, %edi
     mov $__bss_end, %ecx
     sub %edi, %ecx
-    shr $2, %ecx                    /* dword count */
+    shr $2, %ecx
     xor %eax, %eax
     rep stosl
 
-    /* ---- Build identity-mapped page tables (first 4 GiB) ----
-     *
-     *   PML4[0]      -> PDPT
-     *   PDPT[0..3]   -> PD0..PD3
-     *   PD0..3[0..511] -> 2048 × 2 MiB huge pages
-     *
-     * 4 GiB covers kernel memory and PCI MMIO regions (GPU
-     * framebuffers, etc.) typically mapped in the 2–4 GiB range
-     * by UEFI firmware.  Uses only 2 MiB pages (universally
-     * supported on all x86_64 CPUs).
-     */
+    /* ---- Build identity-mapped page tables (first 4 GiB) ---- */
     mov $pdpt, %eax
     or  $(PAGE_PRESENT | PAGE_WRITABLE), %eax
     mov %eax, (pml4)
 
-    /* PDPT[0..3] -> four page directories */
     mov $pd, %eax
     or  $(PAGE_PRESENT | PAGE_WRITABLE), %eax
     mov $pdpt, %edi
@@ -124,7 +124,6 @@ _start:
     dec %ecx
     jnz 2b
 
-    /* Fill all four PDs with 2 MiB huge pages (0 – 4 GiB) */
     mov $pd, %edi
     mov $(PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE), %eax
     mov $2048, %ecx
@@ -144,13 +143,13 @@ _start:
     mov $pml4, %eax
     mov %eax, %cr3
 
-    /* ---- Set IA32_EFER.LME (Long Mode Enable) ---- */
+    /* ---- Set IA32_EFER.LME ---- */
     mov $MSR_EFER, %ecx
     rdmsr
     or  $EFER_LME, %eax
     wrmsr
 
-    /* ---- Turn on paging — enters IA-32e (long) mode ---- */
+    /* ---- Turn on paging — enters long mode ---- */
     mov %cr0, %eax
     or  $CR0_PG, %eax
     mov %eax, %cr0
@@ -161,12 +160,11 @@ _start:
 
 
 /* ================================================================
-   64-bit entry point (long mode)
+   64-bit shared entry (both paths converge here)
    ================================================================ */
 
 .code64
 long_mode_entry:
-    /* Reload all data segment registers with the kernel data selector */
     mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
@@ -174,23 +172,99 @@ long_mode_entry:
     mov %ax, %gs
     mov %ax, %ss
 
-    /* Set up the kernel stack */
     mov $stack_top, %rsp
 
-    /*
-     * Call into the C++ kernel.
-     * System V AMD64 ABI: first arg in %rdi, second in %rsi.
-     *   void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr);
-     */
-    mov %ebp, %edi
-    mov %ebx, %esi
+    mov %ebp, %edi          /* mb_magic  (zero-extended) */
+    mov %ebx, %esi          /* mb_info   (zero-extended) */
     call kernel_main
 
-    /* kernel_main should never return; halt if it does */
 .halt:
     cli
     hlt
     jmp .halt
+
+
+/* ================================================================
+   64-bit EFI entry point (UEFI boot with EFI BS preserved)
+   CPU is already in long mode with EFI's page tables.
+   ================================================================ */
+
+.global _start_efi64
+_start_efi64:
+    cli
+
+    /* Save multiboot args (low 32 bits only). */
+    mov %eax, %ebp
+    mov %ebx, %ebx          /* zero-extend ebx into rbx */
+
+    /* ---- Zero BSS (using EFI's stack) ---- */
+    mov $__bss_start, %rdi
+    mov $__bss_end, %rcx
+    sub %rdi, %rcx
+    shr $3, %rcx
+    xor %eax, %eax
+    rep stosq
+
+    /* ---- Build kernel page tables in memory ----
+     * Prepared for activation AFTER ExitBootServices.
+     * EFI's CR3, GDT, and segments stay untouched so that
+     * firmware protocol calls keep working. */
+    mov $pdpt, %rax
+    or  $(PAGE_PRESENT | PAGE_WRITABLE), %rax
+    mov %rax, (pml4)
+
+    mov $pd, %rax
+    or  $(PAGE_PRESENT | PAGE_WRITABLE), %rax
+    mov $pdpt, %rdi
+    mov $4, %ecx
+2:
+    mov %rax, (%rdi)
+    add $4096, %rax
+    add $8, %rdi
+    dec %ecx
+    jnz 2b
+
+    mov $pd, %rdi
+    mov $(PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE), %rax
+    mov $2048, %ecx
+1:
+    mov %rax, (%rdi)
+    add $0x200000, %rax
+    add $8, %rdi
+    dec %ecx
+    jnz 1b
+
+    /* ---- Switch to our stack, keep EFI's GDT/segments/CR3 ---- */
+    mov $stack_top, %rsp
+
+    mov %ebp, %edi
+    mov %ebx, %esi
+    call kernel_main
+
+    cli
+    hlt
+    jmp .-2
+
+
+/* ── Called from C++ after ExitBootServices to switch to our GDT ─── */
+
+.global switch_to_kernel_gdt
+switch_to_kernel_gdt:
+    lgdt (gdt64_ptr)
+
+    pushq $0x08
+    lea .Lgdt_reload_done(%rip), %rax
+    push %rax
+    lretq
+
+.Lgdt_reload_done:
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    mov %ax, %ss
+    ret
 
 
 /* ================================================================
@@ -217,6 +291,7 @@ gdt64_ptr:
 
 .section .bss
 .align 4096
+.global pml4
 pml4:   .skip 4096
 .global pdpt
 pdpt:   .skip 4096

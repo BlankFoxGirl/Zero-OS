@@ -42,12 +42,15 @@ struct Multiboot2Tag {
     uint32_t size;
 };
 
-constexpr uint32_t MB2_TAG_END         = 0;
-constexpr uint32_t MB2_TAG_CMDLINE     = 1;
-constexpr uint32_t MB2_TAG_BOOTLOADER  = 2;
-constexpr uint32_t MB2_TAG_MODULE      = 3;
-constexpr uint32_t MB2_TAG_MMAP        = 6;
-constexpr uint32_t MB2_TAG_FRAMEBUFFER = 8;
+constexpr uint32_t MB2_TAG_END              = 0;
+constexpr uint32_t MB2_TAG_CMDLINE          = 1;
+constexpr uint32_t MB2_TAG_BOOTLOADER       = 2;
+constexpr uint32_t MB2_TAG_MODULE           = 3;
+constexpr uint32_t MB2_TAG_MMAP             = 6;
+constexpr uint32_t MB2_TAG_FRAMEBUFFER      = 8;
+constexpr uint32_t MB2_TAG_EFI_ST64         = 12;
+constexpr uint32_t MB2_TAG_EFI_BS           = 18;
+constexpr uint32_t MB2_TAG_EFI_IMG_HANDLE64 = 20;
 
 struct Multiboot2ModuleTag {
     uint32_t type;

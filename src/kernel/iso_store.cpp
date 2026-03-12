@@ -35,13 +35,12 @@ static uint32_t show_iso_menu(IsoEntry *entries, uint32_t count) {
     kprintf("\nSelect [1-%u]: ", count);
 
     for (;;) {
-        char c = arch_serial_getchar();
+        char c = arch_console_getchar();
 
         if (c >= '1' && c <= '9') {
             uint32_t choice = static_cast<uint32_t>(c - '0');
             if (choice >= 1 && choice <= count) {
-                arch_serial_putchar(c);
-                kprintf("\n\n");
+                kprintf("%c\n\n", c);
                 return choice - 1;
             }
         }
@@ -81,6 +80,8 @@ IsoStoreResult iso_store_detect_and_select(uint64_t store_hpa, uint64_t store_si
         Fat32File *f = &dir_entries[i];
         if (f->is_directory || f->file_size == 0)
             continue;
+        if (f->name[0] == '.')
+            continue;
         if (!has_iso_extension(f->name))
             continue;
 
@@ -109,8 +110,11 @@ IsoStoreResult iso_store_detect_and_select(uint64_t store_hpa, uint64_t store_si
     result.found = true;
 
     if (iso_count == 1) {
-        kprintf("iso_store: single ISO detected, auto-selecting %s\n",
-                isos[0].name);
+        kprintf("\niso_store: 1 guest image found:\n");
+        kprintf("  [1]  %s  (%llu MiB)\n",
+                isos[0].name,
+                (unsigned long long)(isos[0].size / (1024 * 1024)));
+        kprintf("iso_store: auto-selecting %s\n", isos[0].name);
         result.selected_hpa  = isos[0].hpa;
         result.selected_size = isos[0].size;
         return result;

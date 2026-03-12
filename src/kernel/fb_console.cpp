@@ -346,21 +346,28 @@ void fb_putchar(char c) {
 }
 
 void fb_flush() {
-    if (!con.ready || !con.buffered)
-        return;
-    if (con.dirty_y0 >= con.dirty_y1)
+    if (!con.ready)
         return;
 
-    uint32_t y0 = con.dirty_y0;
-    uint32_t y1 = con.dirty_y1;
-    if (y1 > con.height) y1 = con.height;
+    if (con.buffered) {
+        if (con.dirty_y0 >= con.dirty_y1)
+            return;
 
-    memcpy(con.fb  + y0 * con.pitch,
-           con.buf + y0 * con.pitch,
-           (y1 - y0) * con.pitch);
+        uint32_t y0 = con.dirty_y0;
+        uint32_t y1 = con.dirty_y1;
+        if (y1 > con.height) y1 = con.height;
 
-    con.dirty_y0 = con.height;
-    con.dirty_y1 = 0;
+        memcpy(con.fb  + y0 * con.pitch,
+               con.buf + y0 * con.pitch,
+               (y1 - y0) * con.pitch);
+
+        con.dirty_y0 = con.height;
+        con.dirty_y1 = 0;
+    }
+
+#if defined(__x86_64__) || defined(__i386__)
+    asm volatile("sfence" ::: "memory");
+#endif
 }
 
 bool fb_available() {

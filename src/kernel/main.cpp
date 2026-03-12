@@ -127,6 +127,9 @@ MemoryLayout compute_memory_layout(uint64_t ram_base, uint64_t total_ram) {
 
     vm_run_test_guest(&layout, &info);
 
-    kprintf("System halting.\n");
-    arch_halt();
+    kprintf("System halting. Press Ctrl+Alt+Delete to reboot.\n");
+    for (;;) {
+        if (arch_poll_ctrl_alt_del())
+            arch_reboot();
+    }
 }
